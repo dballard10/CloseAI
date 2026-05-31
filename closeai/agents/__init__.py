@@ -6,6 +6,7 @@ from .reconciler import Reconciler
 from .policy import PolicyAgent
 from .masker import Masker
 from .reidentifier import Reidentifier
+from .surrogate import SurrogateGenerator
 
 __all__ = [
     "PresidioDetector",
@@ -14,4 +15,5 @@ __all__ = [
     "PolicyAgent",
     "Masker",
     "Reidentifier",
+    "SurrogateGenerator",
 ]

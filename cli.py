@@ -34,8 +34,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CloseAI de-identifying LLM proxy")
     parser.add_argument("prompt", nargs="?", help="prompt text (or pipe via stdin)")
     parser.add_argument("--deidentify-only", action="store_true", help="skip the model call")
-    parser.add_argument("--provider", help="override CLOSEAI_PROVIDER (openai|anthropic|wandb|echo)")
-    parser.add_argument("--model", help="override CLOSEAI_MODEL")
+    parser.add_argument("--model", help="override CLOSEAI_MODEL (the local Ollama model)")
     parser.add_argument("--no-trace", action="store_true", help="disable Weave tracing")
     args = parser.parse_args()
 
@@ -44,8 +43,6 @@ def main() -> None:
         parser.error("provide a prompt argument or pipe text via stdin")
 
     settings = Settings()
-    if args.provider:
-        settings.provider = args.provider
     if args.model:
         settings.model = args.model
 
@@ -70,8 +67,8 @@ def main() -> None:
     print("\n=== RE-IDENTIFIED RESPONSE (shown to user) ===")
     print(result.reidentified_response)
     print(
-        f"\n[stats] detected={result.n_detected} masked={result.n_masked} "
-        f"generalized={result.n_generalized} dropped={result.n_dropped} "
+        f"\n[stats] detected={result.n_detected} surrogated={result.n_surrogated} "
+        f"described={result.n_described} dropped={result.n_dropped} "
         f"kept={result.n_kept}"
     )
 

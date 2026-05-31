@@ -12,8 +12,8 @@
       --text: #e6edf3;
       --muted: #8b98a9;
       --accent: #6ea8fe;
-      --mask: #f0a05a;
-      --generalize: #8bd17c;
+      --surrogate: #f0a05a;
+      --describe: #8bd17c;
       --drop: #f06a6a;
       --keep: #7a8699;
       --border: #233044;
@@ -50,13 +50,13 @@
     select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
     pre, .out { white-space: pre-wrap; word-wrap: break-word; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 14px; min-height: 40px; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-right: 6px; }
-    .pill.mask { background: rgba(240,160,90,0.18); color: var(--mask); }
-    .pill.generalize { background: rgba(139,209,124,0.18); color: var(--generalize); }
+    .pill.surrogate { background: rgba(240,160,90,0.18); color: var(--surrogate); }
+    .pill.describe { background: rgba(139,209,124,0.18); color: var(--describe); }
     .pill.drop { background: rgba(240,106,106,0.18); color: var(--drop); }
     .pill.keep { background: rgba(122,134,153,0.18); color: var(--keep); }
     mark { border-radius: 4px; padding: 1px 3px; color: #06101f; }
-    mark.mask { background: var(--mask); }
-    mark.generalize { background: var(--generalize); }
+    mark.surrogate { background: var(--surrogate); }
+    mark.describe { background: var(--describe); }
     mark.drop { background: var(--drop); text-decoration: line-through; }
     mark.keep { background: var(--keep); }
     .ent { display: flex; gap: 8px; align-items: baseline; padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
@@ -92,15 +92,7 @@
       </div>
       <div class="row">
         <button id="btn-deid">De-identify only</button>
-        <button id="btn-query" class="secondary">De-identify &amp; query model</button>
-        <select id="provider" title="closed model provider">
-          <option value="">(server default)</option>
-          <option value="echo">echo (offline)</option>
-          <option value="ollama">ollama (local)</option>
-          <option value="openai">openai</option>
-          <option value="anthropic">anthropic</option>
-          <option value="wandb">wandb inference</option>
-        </select>
+        <button id="btn-query" class="secondary">De-identify &amp; query local model</button>
         <span id="status" class="muted"></span>
       </div>
     </div>
@@ -139,7 +131,7 @@
       try {
         const r = await fetch("/api/health");
         const j = await r.json();
-        $("health").textContent = `presidio:${j.presidio_mode} · llm-detector:${j.llm_detector_enabled ? "on" : "off"} · ${j.provider}/${j.model}`;
+        $("health").textContent = `presidio:${j.presidio_mode} · llm-detector:${j.llm_detector_enabled ? "on" : "off"} · closed-model:${j.closed_model}`;
       } catch { $("health").textContent = "server offline"; }
     }
 
@@ -176,8 +168,8 @@
     function renderStats(r) {
       $("stats").innerHTML = `
         <span>detected <b>${r.n_detected ?? r.decisions.length}</b></span>
-        <span>masked <b>${r.n_masked ?? "-"}</b></span>
-        <span>generalized <b>${r.n_generalized ?? "-"}</b></span>
+        <span>surrogated <b>${r.n_surrogated ?? "-"}</b></span>
+        <span>described <b>${r.n_described ?? "-"}</b></span>
         <span>dropped <b>${r.n_dropped ?? "-"}</b></span>
         <span>kept <b>${r.n_kept ?? "-"}</b></span>`;
     }
@@ -209,7 +201,7 @@
       try {
         const r = await fetch("/api/query", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: $("input").value, provider: $("provider").value || null })
+          body: JSON.stringify({ text: $("input").value })
         });
         const j = await r.json();
         renderEntities(j.mask_result.decisions);

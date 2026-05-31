@@ -13,9 +13,8 @@ spacy>=3.7
 # --- agent 2: local contextual detection via Ollama ---
 requests>=2.31
 
-# --- closed-model clients (install what you use) ---
-openai>=1.30
-anthropic>=0.25
+# --- agent 4: realistic surrogate values (optional; falls back to builtin lists) ---
+faker>=24.0
 
 # --- web demo ---
 fastapi>=0.110

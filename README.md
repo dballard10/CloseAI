@@ -26,7 +26,7 @@ flowchart TD
     L -->|spans| R
     R -->|candidate entities| PO[Agent 4: Policy Agent<br/>mask / generalize / drop / keep]
     PO -->|plan| M[Agent 5: Masker<br/>apply plan + write entity map]
-    M -->|masked prompt| C{{Closed model<br/>OpenAI / Anthropic / W&B}}
+    M -->|masked prompt| C{{Closed model<br/>local Ollama model}}
     M -. entity map stays local .-> RID
     C -->|masked response| RID[Re-identifier<br/>placeholders -> originals]
     RID --> OUT[Final answer to user]
@@ -56,16 +56,21 @@ call to `deidentify_and_query` renders as a full **trace tree** in Weave.
 | **Reconciler** | union + merge | combines both, **biases to over-detection** | — |
 
 Then the **Policy agent** decides *per entity* what to do — this is the
-privacy-vs-utility knob, instead of nuking everything:
+privacy-vs-utility knob. The goal is to keep the outgoing prompt **natural
+English** (so the closed model doesn't refuse or get confused) while leaking
+nothing:
 
-- **mask** → reversible placeholder, restored after the model answers (`PERSON`, `EMAIL`, `PHONE`)
-- **generalize** → exact age → range, city → region, date → year (`AGE`, `LOCATION`, `DATE_TIME`)
-- **drop** → deleted, never sent, never restored (`SSN`, `CREDIT_CARD`)
-- **keep** → low-risk, high-utility text left untouched
+- **surrogate** → swap in a realistic fake of the same type, reversible
+  (`Jane Doe` → `Maria Lopez`, a real email → a fake email). Used for `PERSON`,
+  `EMAIL`, `PHONE`, `ORGANIZATION`, `LOCATION`. Restored after the model answers.
+- **describe** → natural-language coarsening of metrics (`37` → "in their late
+  30s", a date → "around 2024", `SSN` → "a confidential number"). Irreversible.
+- **drop** → deleted entirely (available for anything too sensitive to even fake).
+- **keep** → low-risk, high-utility text left untouched.
 
-The **Masker** applies the plan and writes the `entity_map` (placeholder →
+The **Masker** applies the plan and writes the `entity_map` (surrogate →
 original) — the only artifact that can undo the masking, and it never leaves the
-process.
+process. Surrogates come from `Faker` when installed, with a built-in fallback.
 
 ---
 
@@ -80,22 +85,21 @@ cp .env.example .env                          # then edit as needed
 wandb login                                   # for Weave tracing
 ```
 
-Runs **with zero config** too: without Presidio it falls back to regex, without
-Ollama it skips the LLM detector, and `CLOSEAI_PROVIDER=echo` needs no API key.
+Runs **with zero API keys**: the closed model is a local Ollama model. Without
+Presidio it falls back to regex, and without Ollama it skips the LLM detector.
 
 ### CLI
 
 ```bash
-# Full round-trip (de-identify -> model -> re-identify)
-python cli.py "Hi, I'm Jane Doe (jane@acme.com). My SSN is 123-45-6789."
+# Full round-trip (de-identify -> local model -> re-identify)
+python cli.py "My name is Jane Doe. Write a one-line greeting that addresses me by name."
+# -> closed model sees a fake name; you see "Hello Jane Doe, ..."
 
 # Just show what would be masked
 python cli.py --deidentify-only "My manager at the Cambridge office is 37."
 
-# Test the whole round-trip with a LOCAL model as the "closed" model (no API key)
-python cli.py --provider ollama --model llama2:latest \
-  "My name is Jane Doe. Write a one-line greeting that addresses me by name."
-# -> closed model sees "[PERSON_1]"; you see "Hello Jane Doe, ..."
+# Pin a specific local model
+python cli.py --model llama2:latest "Hi, I'm Jane Doe (jane@acme.com)."
 ```
 
 ### Web demo
@@ -158,7 +162,7 @@ closeai/
   schemas.py          # Span, EntityDecision, MaskResult, PipelineResult
   config.py           # Settings + the per-entity POLICY map (the tuning knob)
   observability.py    # Weave @op wrapper with graceful no-op fallback
-  llm_client.py       # closed model client (openai|anthropic|wandb|ollama|echo)
+  llm_client.py       # closed model client (local Ollama)
   pipeline.py         # orchestrator: the top-level traced flow
   agents/
     presidio_detector.py   # agent 1  (+ regex fallback)
@@ -189,5 +193,6 @@ cli.py
   degradation everywhere, and tests.
 - **Creativity** — the *re-identification* round-trip and the three-detector
   reconciler are the novel bits.
-- **Sponsor usage** — W&B Weave for tracing **and** evaluation, plus optional
-  W&B Inference as the closed model and the W&B MCP for auto-tuning.
+- **Sponsor usage** — W&B Weave for tracing **and** evaluation, plus the W&B MCP
+  for auto-tuning. (The closed model runs locally via Ollama, so nothing leaves
+  the machine even during the demo.)

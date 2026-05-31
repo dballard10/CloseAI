@@ -16,13 +16,19 @@ from pydantic import BaseModel, Field
 class Action(str, Enum):
     """What the policy agent decides to do with a detected entity.
 
-    MASK is reversible (placeholder -> original is stored in the entity map and
-    restored after the model responds). GENERALIZE and DROP are deliberately
+    The outgoing prompt is kept as natural English: identifiers are swapped for
+    realistic *surrogates* (a random fake name/email/etc.) rather than ugly
+    ``[PERSON_1]`` tags, and quantitative facts are turned into natural
+    descriptions. This reads normally to the closed model (so it doesn't refuse
+    or get confused) while leaking nothing.
+
+    SURROGATE is reversible (surrogate -> original is stored in the entity map
+    and restored after the model responds). DESCRIBE and DROP are deliberately
     irreversible: the original never leaves the machine.
     """
 
-    MASK = "mask"            # replace with a reversible placeholder, e.g. [PERSON_1]
-    GENERALIZE = "generalize"  # coarsen, e.g. 37 -> "30s", "Cambridge" -> "New England"
+    SURROGATE = "surrogate"  # realistic fake of the same type, reversible (Jane Doe -> Maria Lopez)
+    DESCRIBE = "describe"    # natural-language coarsening, e.g. 37 -> "in their late 30s"
     DROP = "drop"            # remove entirely, never sent, never restored
     KEEP = "keep"            # leave untouched (low-risk and high-utility)
 
@@ -50,11 +56,12 @@ class EntityDecision(BaseModel):
     span: Span
     action: Action
     # The string that physically replaces the span in the outgoing text.
-    # For MASK this is the placeholder, for GENERALIZE the coarsened value,
+    # For SURROGATE this is the fake value, for DESCRIBE the natural description,
     # for DROP an empty string, for KEEP the original text.
     replacement: str
-    # Present only for reversible (MASK) entities so the re-identifier can undo it.
-    placeholder: Optional[str] = None
+    # Present only for reversible (SURROGATE) entities so the re-identifier can
+    # map the fake value back to the original.
+    surrogate: Optional[str] = None
 
 
 class MaskResult(BaseModel):
@@ -77,7 +84,7 @@ class PipelineResult(BaseModel):
     mask_result: MaskResult
     # Coarse stats that are nice to show in a demo / log to Weave.
     n_detected: int = 0
-    n_masked: int = 0
-    n_generalized: int = 0
+    n_surrogated: int = 0
+    n_described: int = 0
     n_dropped: int = 0
     n_kept: int = 0
