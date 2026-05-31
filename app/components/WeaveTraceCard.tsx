@@ -3,7 +3,7 @@ import type { RunResponse } from "@/lib/types";
 import { Badge } from "./ui/badge";
 import { PipelineCard } from "./PipelineCard";
 
-export function WeaveTraceCard({ result }: { result?: RunResponse | null }) {
+export function WeaveTraceCard({ result }: { result?: Partial<RunResponse> | null }) {
   const metadata = result?.weaveMetadata;
   const versions = result?.promptVersions;
 

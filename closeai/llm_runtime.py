@@ -1,7 +1,8 @@
 """LLM clients for the ClosedAI privacy-gate pipeline.
 
-Trusted steps use a local Ollama model. The external consultant can use W&B
-Inference, but it only ever receives sanitized text after the privacy gate.
+Trusted steps can use either local Ollama or W&B Inference. The external
+consultant can use OpenAI, W&B Inference, or a mock fallback, but it only ever
+receives sanitized text after the privacy gate.
 """
 
 from __future__ import annotations
@@ -97,16 +98,23 @@ class LocalLLM:
 
 
 class WANDbInferenceClient:
-    def __init__(self):
+    def __init__(
+        self,
+        model_env_var: str = "CLOSEDAI_EXTERNAL_MODEL",
+        default_model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    ):
         self.base_url = os.getenv("WANDB_INFERENCE_BASE_URL", "https://api.inference.wandb.ai/v1")
         self.api_key = os.getenv("WANDB_API_KEY")
-        self.model = os.getenv("CLOSEDAI_EXTERNAL_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+        self.model_env_var = model_env_var
+        self.model = os.getenv(model_env_var, default_model)
+        self.last_error: str | None = None
 
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat_json(self, system: str, user: str) -> dict[str, Any] | None:
+    def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not self.api_key:
+            self.last_error = "WANDB_API_KEY is not set"
             return None
         try:
             from openai import OpenAI
@@ -122,8 +130,48 @@ class WANDbInferenceClient:
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or ""
+            self.last_error = None
             return parse_json_object(content)
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+
+class OpenAIExternalClient:
+    def __init__(
+        self,
+        model_env_var: str = "CLOSEDAI_EXTERNAL_MODEL",
+        default_model: str = "gpt-5.5",
+    ):
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.model_env_var = model_env_var
+        self.model = os.getenv(model_env_var, default_model)
+        self.last_error: str | None = None
+
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not self.api_key:
+            self.last_error = "OPENAI_API_KEY is not set"
+            return None
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=self.api_key)
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or ""
+            self.last_error = None
+            return parse_json_object(content)
+        except Exception as exc:
+            self.last_error = str(exc)
             return None
 
 

@@ -3,7 +3,7 @@ export type Risk = "low" | "medium" | "high";
 
 export type RunRequest = {
   rawPrompt: string;
-  mode: Mode;
+  mode?: Mode;
 };
 
 export type SensitiveEntity = {
@@ -62,6 +62,13 @@ export type RunResponse = {
 
 export type DemoExample = {
   label: string;
-  mode: Mode;
   prompt: string;
+};
+
+export type PipelinePatch = Partial<RunResponse>;
+
+export type PipelineEvent = {
+  stage: string;
+  patch?: PipelinePatch;
+  error?: string;
 };

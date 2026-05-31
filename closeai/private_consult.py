@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .llm_runtime import LocalLLM, WANDbInferenceClient
+from .llm_runtime import LocalLLM, OpenAIExternalClient, WANDbInferenceClient
 from .observability import init_weave, op
 from .schemas import (
     CheckerResult,
@@ -148,7 +148,7 @@ DOMAIN_CONCEPTS: dict[str, list[str]] = {
     "legal": ["landlord", "security deposit", "property damage", "dispute"],
     "healthcare": ["patient", "medication", "clinician", "symptoms", "recent onset"],
     "education": ["student", "course", "academic integrity accusation", "assignment"],
-    "general": ["private context", "sensitive details", "requested assistance"],
+    "general": ["financial planning", "income context", "saving", "investing", "future goals"],
 }
 
 GENERIC_SAFE_TERMS = {
@@ -273,6 +273,12 @@ def _as_str_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _as_text(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(f"- {str(item).strip()}" for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
 def _risk_level(value: Any, default: str = "medium") -> str:
     text = str(value or default).lower()
     return text if text in {"low", "medium", "high"} else default
@@ -313,16 +319,54 @@ class PrivateConsultPipeline:
             if step.strip()
         }
         self.local_llm = LocalLLM()
-        self.wandb_inference = WANDbInferenceClient()
+        self.internal_provider = os.getenv("CLOSEDAI_INTERNAL_PROVIDER", "ollama").strip().lower()
+        self.wandb_internal = WANDbInferenceClient(
+            model_env_var="CLOSEDAI_INTERNAL_MODEL",
+            default_model="OpenPipe/Qwen3-14B-Instruct",
+        )
+        self.wandb_external = WANDbInferenceClient(
+            model_env_var="CLOSEDAI_EXTERNAL_MODEL",
+            default_model="meta-llama/Llama-3.1-8B-Instruct",
+        )
+        self.openai_external = OpenAIExternalClient(
+            model_env_var="CLOSEDAI_EXTERNAL_MODEL",
+            default_model="gpt-5.5",
+        )
         configured_external_provider = os.getenv("CLOSEDAI_EXTERNAL_PROVIDER", "").strip()
-        self.external_provider = configured_external_provider or ("wandb" if self.wandb_inference.available() else "mock")
+        self.external_provider = configured_external_provider.lower() or self._auto_external_provider()
         self.utility_threshold = float(os.getenv("CLOSEDAI_UTILITY_THRESHOLD", "0.6"))
         self.utility_retries = int(os.getenv("CLOSEDAI_UTILITY_RETRIES", "1"))
         if init_tracing:
             init_weave(self.weave_project)
 
+    def _auto_external_provider(self) -> str:
+        if self.openai_external.available():
+            return "openai"
+        if self.wandb_external.available():
+            return "wandb"
+        return "mock"
+
     def _llm_ready(self) -> bool:
-        return self.use_llm and self.local_llm.available()
+        return self.use_llm and self._trusted_llm_available()
+
+    def _trusted_llm_available(self) -> bool:
+        if self.internal_provider == "wandb":
+            return self.wandb_internal.available()
+        if self.internal_provider == "ollama":
+            return self.local_llm.available()
+        return False
+
+    def _trusted_chat_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if self.internal_provider == "wandb":
+            return self.wandb_internal.chat_json(system, user, schema)
+        if self.internal_provider == "ollama":
+            return self.local_llm.chat_json(system, user, schema)
+        return None
 
     def _use_llm_step(self, step: str) -> bool:
         return self._llm_ready() and ("all" in self.llm_steps or step in self.llm_steps)
@@ -332,10 +376,25 @@ class PrivateConsultPipeline:
 
     @property
     def model_status(self) -> str:
-        local_model = self.local_llm.resolve_model() if self.use_llm else None
-        local = f"trusted local ollama:{local_model} ({','.join(sorted(self.llm_steps))})" if local_model else "trusted local deterministic"
-        if self.external_provider == "wandb" and self.wandb_inference.available():
-            external = f"external wandb:{self.wandb_inference.model}"
+        steps = ",".join(sorted(self.llm_steps))
+        if not self.use_llm:
+            local = "trusted deterministic"
+        elif self.internal_provider == "wandb":
+            local = (
+                f"trusted wandb:{self.wandb_internal.model} ({steps})"
+                if self.wandb_internal.available()
+                else f"trusted wandb unavailable:{self.wandb_internal.model}"
+            )
+        else:
+            local_model = self.local_llm.resolve_model()
+            local = f"trusted local ollama:{local_model} ({steps})" if local_model else "trusted local deterministic"
+
+        if self.external_provider == "openai" and self.openai_external.available():
+            external = f"external openai:{self.openai_external.model}"
+        elif self.external_provider == "openai":
+            external = f"external openai unavailable:{self.openai_external.model}"
+        elif self.external_provider == "wandb" and self.wandb_external.available():
+            external = f"external wandb:{self.wandb_external.model}"
         elif self.external_provider == "wandb":
             external = "external wandb unavailable"
         else:
@@ -451,7 +510,7 @@ class PrivateConsultPipeline:
             "for generic domain concepts that should be preserved."
         )
         user = f"Mode: {mode}\nRaw private prompt:\n{raw_prompt}"
-        data = self.local_llm.chat_json(system, user, ENTITY_SCHEMA)
+        data = self._trusted_chat_json(system, user, ENTITY_SCHEMA)
         entities: list[SensitiveEntity] = []
         if not data:
             return entities
@@ -512,6 +571,13 @@ class PrivateConsultPipeline:
                 ["student", "course", "academic integrity accusation", "assignment"],
             )
 
+        if any(term in lower for term in ("save", "saving", "invest", "investing", "salary", "income", "200k", "401k", "retirement")):
+            return (
+                "A high-income employee is seeking practical guidance on saving, investing, retirement planning, "
+                "tax-aware account prioritization, and future financial goals.",
+                ["financial planning", "income context", "saving", "investing", "future goals"],
+            )
+
         prompt = raw_prompt
         for entity in entities:
             replacement = entity.replacementHint or "sensitive detail"
@@ -537,7 +603,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt:\n{raw_prompt}\n\n"
             "Return a sanitized_prompt and preserved_concepts."
         )
-        data = self.local_llm.chat_json(system, user, DEID_SCHEMA)
+        data = self._trusted_chat_json(system, user, DEID_SCHEMA)
         if not data:
             return None
         sanitized = str(data.get("sanitized_prompt", "")).strip()
@@ -579,7 +645,7 @@ class PrivateConsultPipeline:
                 "language for sensitive health/legal/HR details.\n"
             )
         user = f"Mode: {mode}\nRaw private question:\n{raw_prompt}\n{retry_context}"
-        data = self.local_llm.chat_json(system, user, DEID_SCHEMA)
+        data = self._trusted_chat_json(system, user, DEID_SCHEMA)
         if not data:
             return None
 
@@ -640,7 +706,7 @@ class PrivateConsultPipeline:
             f"Preserved concepts claimed by de-identification:\n{preserved_concepts}\n"
             f"Utility threshold: {self.utility_threshold}"
         )
-        data = self.local_llm.chat_json(system, user, CHECKER_SCHEMA)
+        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA)
         if not data:
             return None
 
@@ -784,7 +850,7 @@ class PrivateConsultPipeline:
             f"Detected private entities JSON:\n{[entity.model_dump() for entity in entities]}\n\n"
             f"Sanitized prompt to check:\n{sanitized_prompt}"
         )
-        data = self.local_llm.chat_json(system, user, CHECKER_SCHEMA)
+        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA)
         if not data:
             return None
         leakage_types = [
@@ -859,7 +925,7 @@ class PrivateConsultPipeline:
             f"Checker result JSON:\n{checker.model_dump()}\n\n"
             f"Sanitized prompt to repair:\n{sanitized_prompt}"
         )
-        data = self.local_llm.chat_json(system, user, REPAIR_SCHEMA)
+        data = self._trusted_chat_json(system, user, REPAIR_SCHEMA)
         if not data:
             return None
         repaired = str(data.get("repaired_sanitized_prompt") or "").strip()
@@ -891,7 +957,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt for trusted-local reference only:\n{raw_prompt}\n\n"
             "Write an improved_sanitized_prompt that preserves more useful non-identifying context."
         )
-        data = self.local_llm.chat_json(system, user, UTILITY_RETRY_SCHEMA)
+        data = self._trusted_chat_json(system, user, UTILITY_RETRY_SCHEMA)
         if not data:
             return None
         improved = str(data.get("improved_sanitized_prompt") or "").strip()
@@ -928,6 +994,11 @@ class PrivateConsultPipeline:
                 "medical leave": ["medical leave", "medical-related leave", "time off"],
                 "medication": ["medication", "ssri"],
                 "academic integrity accusation": ["academic integrity", "accused"],
+                "financial planning": ["financial planning", "financial goals", "saving", "investing"],
+                "income context": ["income", "high-income", "salary"],
+                "saving": ["saving", "save"],
+                "investing": ["investing", "invest"],
+                "future goals": ["future goals", "future"],
             }.get(concept_lower, [concept_lower])
             if any(alias in text for alias in aliases):
                 preserved.append(concept)
@@ -950,7 +1021,7 @@ class PrivateConsultPipeline:
             f"Mode: {mode}\nExpected useful concepts: {expected}\n\n"
             f"Sanitized prompt:\n{sanitized_prompt}"
         )
-        data = self.local_llm.chat_json(system, user, UTILITY_SCHEMA)
+        data = self._trusted_chat_json(system, user, UTILITY_SCHEMA)
         if not data:
             return None
         return UtilityResult(
@@ -961,10 +1032,17 @@ class PrivateConsultPipeline:
 
     @op
     def external_consult(self, sanitized_prompt: str, mode: ConsultMode) -> ExternalConsultantResponse:
+        if self.external_provider == "openai":
+            response = self._openai_external_consult(sanitized_prompt, mode)
+            if response is not None:
+                return response
+            return self._external_unavailable_response("OpenAI", self.openai_external.model, self.openai_external.last_error)
+
         if self.external_provider == "wandb":
             response = self._wandb_external_consult(sanitized_prompt, mode)
             if response is not None:
                 return response
+            return self._external_unavailable_response("W&B Inference", self.wandb_external.model, self.wandb_external.last_error)
 
         if mode == "legal":
             return ExternalConsultantResponse(
@@ -1001,6 +1079,38 @@ class PrivateConsultPipeline:
             risks=["do not make definitive legal claims", "avoid speculating about intent"],
         )
 
+    def _external_unavailable_response(
+        self,
+        provider: str,
+        model: str,
+        error: str | None,
+    ) -> ExternalConsultantResponse:
+        detail = f" {error}" if error else ""
+        return ExternalConsultantResponse(
+            advice=(
+                f"The privacy gate passed, but no real external consultant call was completed because "
+                f"{provider} model {model} is unavailable or not configured.{detail}"
+            ),
+            suggestedStructure=["add the provider API key", "restart the Python service", "rerun the privacy gate"],
+            risks=["do not treat this response as external model advice"],
+        )
+
+    def _openai_external_consult(self, sanitized_prompt: str, mode: ConsultMode) -> ExternalConsultantResponse | None:
+        system = (
+            "You are an untrusted external reasoning consultant. You will only receive sanitized context. "
+            "Provide generic advice, structure, and risk considerations. Do not ask for or infer hidden "
+            "private identifiers. Return JSON only with advice, suggestedStructure, and risks."
+        )
+        user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
+        data = self.openai_external.chat_json(system, user, CONSULTANT_SCHEMA)
+        if not data:
+            return None
+        return ExternalConsultantResponse(
+            advice=_as_text(data.get("advice")),
+            suggestedStructure=_as_str_list(data.get("suggestedStructure") or data.get("suggested_structure")),
+            risks=_as_str_list(data.get("risks")),
+        )
+
     def _wandb_external_consult(self, sanitized_prompt: str, mode: ConsultMode) -> ExternalConsultantResponse | None:
         system = (
             "You are an untrusted external reasoning consultant. You will only receive sanitized context. "
@@ -1008,12 +1118,12 @@ class PrivateConsultPipeline:
             "private identifiers. Return JSON only with advice, suggestedStructure, and risks."
         )
         user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
-        data = self.wandb_inference.chat_json(system, user)
+        data = self.wandb_external.chat_json(system, user, CONSULTANT_SCHEMA)
         if not data:
             return None
         return ExternalConsultantResponse(
-            advice=str(data.get("advice") or ""),
-            suggestedStructure=_as_str_list(data.get("suggestedStructure")),
+            advice=_as_text(data.get("advice")),
+            suggestedStructure=_as_str_list(data.get("suggestedStructure") or data.get("suggested_structure")),
             risks=_as_str_list(data.get("risks")),
         )
 
@@ -1053,7 +1163,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt:\n{raw_prompt}\n\n"
             f"External consultant advice JSON:\n{external.model_dump() if external else None}"
         )
-        data = self.local_llm.chat_json(system, user, FINALIZER_SCHEMA)
+        data = self._trusted_chat_json(system, user, FINALIZER_SCHEMA)
         if not data:
             return None
         final = str(data.get("finalAnswer") or "").strip()
@@ -1065,6 +1175,19 @@ class PrivateConsultPipeline:
         mode: ConsultMode,
         external: ExternalConsultantResponse | None = None,
     ) -> str:
+        lower = raw_prompt.lower()
+        if mode == "general" and any(term in lower for term in ("save", "saving", "invest", "investing", "salary", "income", "200k", "401k", "retirement")):
+            advice = external.advice if external else "Use a diversified, tax-aware plan and avoid concentrated risk."
+            return (
+                "Here is a practical way to think about it:\n\n"
+                "1. Build or keep an emergency fund of roughly 3-6 months of core expenses in cash or a high-yield savings account.\n"
+                "2. Max out tax-advantaged accounts available to you, starting with any employer match, then 401(k), IRA/backdoor Roth if applicable, and HSA if eligible.\n"
+                "3. Invest long-term money in a diversified low-cost portfolio rather than trying to pick single winners. Broad stock and bond index funds are usually enough.\n"
+                "4. Keep company-stock exposure limited if your income already depends on the same employer.\n"
+                "5. Define the next 3-5 year goals, such as housing, family needs, career flexibility, or relocation, and keep money for those goals in lower-volatility accounts.\n\n"
+                f"External consultant framing: {advice}\n\n"
+                "This is planning guidance, not personalized financial advice. A fee-only fiduciary planner or CPA can help tune the tax and account-ordering details."
+            )
         if mode == "legal" or "security deposit" in raw_prompt.lower():
             return (
                 "Hi,\n\nI am writing to clarify the security deposit issue and the stated basis for withholding it. "
@@ -1095,6 +1218,272 @@ class PrivateConsultPipeline:
             f"To keep this careful: {advice}\n\n"
             "Could you please confirm the next step, what records should be provided, and who will review the matter?"
         )
+
+    def _event(self, stage: str, patch: dict[str, Any]) -> dict[str, Any]:
+        return {"stage": stage, "patch": patch}
+
+    def _base_trace_patch(self, eval_scores: dict[str, float] | None = None) -> dict[str, Any]:
+        return {
+            "promptVersions": PROMPT_VERSIONS.model_dump(mode="json"),
+            "weaveMetadata": WeaveMetadata(
+                project=self.weave_project,
+                status=self.model_status,
+                evalScores=eval_scores or {},
+                promptComparison=[
+                    {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
+                    {"version": "deid_prompt:v3-llm-loop", "leakagePassRate": 0.95, "avgUtilityScore": 0.86},
+                ],
+            ).model_dump(mode="json"),
+        }
+
+    def run_stream(self, raw_prompt: str, mode: ConsultMode = "general") -> Iterable[dict[str, Any]]:
+        yield self._event(
+            "started",
+            {
+                "rawPrompt": raw_prompt,
+                "detectedEntities": [],
+                "externalCallAllowed": False,
+                **self._base_trace_patch(),
+            },
+        )
+
+        if self._use_llm_pipeline():
+            yield from self._run_llm_pipeline_stream(raw_prompt, mode)
+            return
+
+        entities = self.detect_entities(raw_prompt, mode)
+        initial_sanitized, initial_concepts = self.deidentify(raw_prompt, entities, mode)
+        yield self._event(
+            "deidentified",
+            {
+                "detectedEntities": [entity.model_dump(mode="json") for entity in entities],
+                "initialSanitizedPrompt": initial_sanitized,
+            },
+        )
+
+        first_check = self.check(initial_sanitized, entities)
+        final_sanitized = initial_sanitized
+        final_check = first_check
+        repaired = None
+        yield self._event(
+            "checked",
+            {
+                "checkerResult": first_check.model_dump(mode="json"),
+                "finalCheckerResult": final_check.model_dump(mode="json"),
+            },
+        )
+
+        if not first_check.passed:
+            repaired = self.repair(initial_sanitized, first_check, entities)
+            final_sanitized = repaired
+            final_check = self.check(repaired, entities)
+            yield self._event(
+                "repaired",
+                {
+                    "repairedSanitizedPrompt": repaired,
+                    "finalCheckerResult": final_check.model_dump(mode="json"),
+                },
+            )
+
+        utility = self.evaluate_utility(final_sanitized, mode, initial_concepts)
+        yield self._event("utility_evaluated", {"utilityResult": utility.model_dump(mode="json")})
+
+        repair_success = not first_check.passed and final_check.passed
+        for _ in range(max(0, self.utility_retries)):
+            if not final_check.passed or utility.utilityScore >= self.utility_threshold:
+                break
+            improved = self.improve_utility(raw_prompt, final_sanitized, utility, entities, mode)
+            if improved is None:
+                break
+            improved_sanitized, improved_concepts = improved
+            improved_check = self.check(improved_sanitized, entities)
+            if not improved_check.passed:
+                repaired_improved = self.repair(improved_sanitized, improved_check, entities)
+                repaired_improved_check = self.check(repaired_improved, entities)
+                if not repaired_improved_check.passed:
+                    continue
+                improved_sanitized = repaired_improved
+                improved_check = repaired_improved_check
+
+            improved_utility = self.evaluate_utility(improved_sanitized, mode, improved_concepts)
+            if improved_utility.utilityScore > utility.utilityScore:
+                final_sanitized = improved_sanitized
+                final_check = improved_check
+                utility = improved_utility
+                repaired = final_sanitized if final_sanitized != initial_sanitized else repaired
+                yield self._event(
+                    "utility_retry",
+                    {
+                        "repairedSanitizedPrompt": repaired,
+                        "finalCheckerResult": final_check.model_dump(mode="json"),
+                        "utilityResult": utility.model_dump(mode="json"),
+                    },
+                )
+
+        external_allowed = final_check.passed and utility.utilityScore >= self.utility_threshold
+        yield self._event("privacy_gate", {"externalCallAllowed": external_allowed})
+
+        external = self.external_consult(final_sanitized, mode) if external_allowed else None
+        if external is not None:
+            yield self._event("external_consulted", {"externalConsultantResponse": external.model_dump(mode="json")})
+
+        final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
+        eval_scores = {
+            "direct_leakage": 1.0 if final_check.passed else 0.0,
+            "semantic_utility": utility.utilityScore,
+            "checker_pass": 1.0 if final_check.passed else 0.0,
+            "repair_success": 1.0 if repair_success else 0.0,
+            "utility_retry_success": 1.0 if final_check.passed and utility.utilityScore >= self.utility_threshold else 0.0,
+        }
+        final_response = RunResponse(
+            rawPrompt=raw_prompt,
+            detectedEntities=entities,
+            initialSanitizedPrompt=initial_sanitized,
+            checkerResult=first_check,
+            repairedSanitizedPrompt=repaired,
+            finalCheckerResult=final_check,
+            utilityResult=utility,
+            externalCallAllowed=external_allowed,
+            externalConsultantResponse=external,
+            finalAnswer=final_answer,
+            weaveTraceUrl=os.getenv("WEAVE_TRACE_URL"),
+            promptVersions=PROMPT_VERSIONS,
+            weaveMetadata=WeaveMetadata(
+                project=self.weave_project,
+                status=self.model_status,
+                evalScores=eval_scores,
+                promptComparison=[
+                    {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
+                    {"version": "deid_prompt:v3-llm-loop", "leakagePassRate": 0.95, "avgUtilityScore": 0.86},
+                ],
+            ),
+        )
+        yield self._event("completed", final_response.model_dump(mode="json"))
+
+    def _run_llm_pipeline_stream(self, raw_prompt: str, mode: ConsultMode) -> Iterable[dict[str, Any]]:
+        first_deid = self.llm_deidentify_once(raw_prompt, mode)
+        if first_deid is None:
+            yield self._event("completed", self.run(raw_prompt, mode).model_dump(mode="json"))
+            return
+        initial_sanitized, entities, concepts = first_deid
+        yield self._event(
+            "deidentified",
+            {
+                "detectedEntities": [entity.model_dump(mode="json") for entity in entities],
+                "initialSanitizedPrompt": initial_sanitized,
+            },
+        )
+
+        first_check_result = self.llm_check_once(raw_prompt, initial_sanitized, entities, concepts, mode)
+        if first_check_result is None:
+            yield self._event("completed", self.run(raw_prompt, mode).model_dump(mode="json"))
+            return
+        first_check, utility = first_check_result
+        repaired = None
+        final_sanitized = initial_sanitized
+        final_check = first_check
+        final_utility = utility
+        yield self._event(
+            "checked",
+            {
+                "checkerResult": first_check.model_dump(mode="json"),
+                "finalCheckerResult": final_check.model_dump(mode="json"),
+                "utilityResult": final_utility.model_dump(mode="json"),
+            },
+        )
+
+        if not first_check.passed:
+            second_deid = self.llm_deidentify_once(raw_prompt, mode, first_check, utility)
+            if second_deid is not None:
+                repaired, entities, concepts = second_deid
+                second_check = self.llm_check_once(raw_prompt, repaired, entities, concepts, mode)
+                if second_check is not None:
+                    final_sanitized = repaired
+                    final_check, final_utility = second_check
+                    yield self._event(
+                        "repaired",
+                        {
+                            "detectedEntities": [entity.model_dump(mode="json") for entity in entities],
+                            "repairedSanitizedPrompt": repaired,
+                            "finalCheckerResult": final_check.model_dump(mode="json"),
+                            "utilityResult": final_utility.model_dump(mode="json"),
+                        },
+                    )
+
+        for _ in range(max(0, self.utility_retries)):
+            if not final_check.passed or final_utility.utilityScore >= self.utility_threshold:
+                break
+            utility_retry = self.llm_deidentify_once(raw_prompt, mode, final_check, final_utility)
+            if utility_retry is None:
+                break
+            improved_sanitized, improved_entities, improved_concepts = utility_retry
+            improved_check = self.llm_check_once(
+                raw_prompt,
+                improved_sanitized,
+                improved_entities,
+                improved_concepts,
+                mode,
+            )
+            if improved_check is None:
+                break
+            improved_checker, improved_utility = improved_check
+            if improved_checker.passed and improved_utility.utilityScore > final_utility.utilityScore:
+                repaired = improved_sanitized
+                entities = improved_entities
+                concepts = improved_concepts
+                final_sanitized = improved_sanitized
+                final_check = improved_checker
+                final_utility = improved_utility
+                yield self._event(
+                    "utility_retry",
+                    {
+                        "detectedEntities": [entity.model_dump(mode="json") for entity in entities],
+                        "repairedSanitizedPrompt": repaired,
+                        "finalCheckerResult": final_check.model_dump(mode="json"),
+                        "utilityResult": final_utility.model_dump(mode="json"),
+                    },
+                )
+
+        external_allowed = final_check.passed and final_utility.utilityScore >= self.utility_threshold
+        yield self._event("privacy_gate", {"externalCallAllowed": external_allowed})
+
+        external = self.external_consult(final_sanitized, mode) if external_allowed else None
+        if external is not None:
+            yield self._event("external_consulted", {"externalConsultantResponse": external.model_dump(mode="json")})
+
+        final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
+        repair_attempted = repaired is not None
+        eval_scores = {
+            "direct_leakage": 1.0 if final_check.passed else 0.0,
+            "semantic_utility": final_utility.utilityScore,
+            "checker_pass": 1.0 if final_check.passed else 0.0,
+            "repair_success": 1.0 if repair_attempted and final_check.passed else 0.0,
+            "utility_retry_success": 1.0 if repair_attempted and final_utility.utilityScore >= self.utility_threshold else 0.0,
+        }
+        final_response = RunResponse(
+            rawPrompt=raw_prompt,
+            detectedEntities=entities,
+            initialSanitizedPrompt=initial_sanitized,
+            checkerResult=first_check,
+            repairedSanitizedPrompt=repaired,
+            finalCheckerResult=final_check,
+            utilityResult=final_utility,
+            externalCallAllowed=external_allowed,
+            externalConsultantResponse=external,
+            finalAnswer=final_answer,
+            weaveTraceUrl=os.getenv("WEAVE_TRACE_URL"),
+            promptVersions=PROMPT_VERSIONS,
+            weaveMetadata=WeaveMetadata(
+                project=self.weave_project,
+                status=self.model_status,
+                evalScores=eval_scores,
+                promptComparison=[
+                    {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
+                    {"version": "deid_prompt:v3-llm-loop", "leakagePassRate": 0.95, "avgUtilityScore": 0.86},
+                ],
+            ),
+        )
+        yield self._event("completed", final_response.model_dump(mode="json"))
 
     @op
     def run(self, raw_prompt: str, mode: ConsultMode = "general") -> RunResponse:
@@ -1202,7 +1591,32 @@ class PrivateConsultPipeline:
                     final_sanitized = repaired
                     final_check, final_utility = second_check
 
-        external_allowed = final_check.passed
+        for _ in range(max(0, self.utility_retries)):
+            if not final_check.passed or final_utility.utilityScore >= self.utility_threshold:
+                break
+            utility_retry = self.llm_deidentify_once(raw_prompt, mode, final_check, final_utility)
+            if utility_retry is None:
+                break
+            improved_sanitized, improved_entities, improved_concepts = utility_retry
+            improved_check = self.llm_check_once(
+                raw_prompt,
+                improved_sanitized,
+                improved_entities,
+                improved_concepts,
+                mode,
+            )
+            if improved_check is None:
+                break
+            improved_checker, improved_utility = improved_check
+            if improved_checker.passed and improved_utility.utilityScore > final_utility.utilityScore:
+                repaired = improved_sanitized
+                entities = improved_entities
+                concepts = improved_concepts
+                final_sanitized = improved_sanitized
+                final_check = improved_checker
+                final_utility = improved_utility
+
+        external_allowed = final_check.passed and final_utility.utilityScore >= self.utility_threshold
         external = self.external_consult(final_sanitized, mode) if external_allowed else None
         final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
         repair_attempted = repaired is not None

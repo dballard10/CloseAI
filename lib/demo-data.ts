@@ -3,31 +3,26 @@ import type { DemoExample, RunResponse } from "@/lib/types";
 export const examples: DemoExample[] = [
   {
     label: "HR leave",
-    mode: "hr",
     prompt:
       "Sarah Klein at Acme Robotics in Boston requested medical leave after a panic disorder diagnosis. Two weeks later, her manager Alex put her on a PIP. Help me write a careful HR response."
   },
   {
     label: "Legal deposit",
-    mode: "legal",
     prompt:
       "My landlord Mark Benson at 45 Winter Street in Cambridge says he will keep my security deposit because of damage from March 7. Help me write a response."
   },
   {
     label: "Healthcare",
-    mode: "healthcare",
     prompt:
       "John Smith lives at 14 Beacon Street and was prescribed sertraline by Dr. Rosen after panic attacks began in April. Help me prepare questions."
   },
   {
     label: "Education",
-    mode: "education",
     prompt:
       "Maya Patel, a Northeastern student in CS 3500, says Professor Lee accused her of cheating on Project 4. Help draft a careful reply."
   },
   {
     label: "Blocked gate",
-    mode: "general",
     prompt: "A person had a situation. Help write a response."
   }
 ];

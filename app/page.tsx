@@ -8,7 +8,6 @@ import { DemoExampleSelector } from "./components/DemoExampleSelector";
 import { EntityTable } from "./components/EntityTable";
 import { ExternalConsultantCard } from "./components/ExternalConsultantCard";
 import { FinalAnswerCard } from "./components/FinalAnswerCard";
-import { ModeSelector } from "./components/ModeSelector";
 import { PipelineCard, TextBlock } from "./components/PipelineCard";
 import { PromptInput } from "./components/PromptInput";
 import { RepairLoopCard } from "./components/RepairLoopCard";
@@ -18,41 +17,80 @@ import { Badge } from "./components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { WeaveTraceCard } from "./components/WeaveTraceCard";
 import { examples } from "@/lib/demo-data";
-import type { DemoExample, Mode, RunResponse } from "@/lib/types";
+import type { DemoExample, PipelineEvent, RunResponse } from "@/lib/types";
 
 export default function Home() {
   const first = examples[0];
   const [prompt, setPrompt] = useState(first.prompt);
-  const [mode, setMode] = useState<Mode>(first.mode);
-  const [result, setResult] = useState<RunResponse | null>(null);
+  const [result, setResult] = useState<Partial<RunResponse> | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [currentStage, setCurrentStage] = useState<string | null>(null);
 
   async function runPipeline() {
     setRunning(true);
     setError(null);
+    setCurrentStage("starting");
+    setResult({ rawPrompt: prompt, detectedEntities: [] });
     try {
-      const response = await fetch("/api/run", {
+      const response = await fetch("/api/run/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rawPrompt: prompt, mode })
+        body: JSON.stringify({ rawPrompt: prompt })
       });
       if (!response.ok) {
         throw new Error(`Request failed with ${response.status}`);
       }
-      setResult((await response.json()) as RunResponse);
+      if (!response.body) {
+        throw new Error("Streaming response was empty");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as PipelineEvent;
+          setCurrentStage(event.stage);
+          if (event.error) {
+            throw new Error(event.error);
+          }
+          if (event.patch) {
+            setResult((previous) => ({ ...(previous ?? {}), ...event.patch }));
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer) as PipelineEvent;
+        setCurrentStage(event.stage);
+        if (event.error) {
+          throw new Error(event.error);
+        }
+        if (event.patch) {
+          setResult((previous) => ({ ...(previous ?? {}), ...event.patch }));
+        }
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setRunning(false);
+      setCurrentStage(null);
     }
   }
 
   function selectExample(example: DemoExample) {
     setPrompt(example.prompt);
-    setMode(example.mode);
     setResult(null);
     setError(null);
+    setCurrentStage(null);
   }
 
   return (
@@ -86,10 +124,9 @@ export default function Home() {
             </CardHeader>
             <CardContent className="space-y-4">
               <PromptInput value={prompt} onChange={setPrompt} onRun={runPipeline} running={running} />
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-muted-foreground">Domain mode</span>
-                <ModeSelector value={mode} onChange={setMode} />
-              </div>
+              {running && currentStage ? (
+                <p className="rounded-md bg-muted p-3 text-sm text-muted-foreground">Current stage: {formatStage(currentStage)}</p>
+              ) : null}
               {error ? <p className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
             </CardContent>
           </Card>
@@ -116,7 +153,7 @@ export default function Home() {
 
         <section className="space-y-4">
           <div className="grid gap-4 xl:grid-cols-2">
-            <PipelineCard title="Detected sensitive entities" badge={`${result?.detectedEntities.length ?? 0} entities`}>
+            <PipelineCard title="Detected sensitive entities" badge={`${result?.detectedEntities?.length ?? 0} entities`}>
               <EntityTable entities={result?.detectedEntities ?? []} />
             </PipelineCard>
 
@@ -146,6 +183,10 @@ export default function Home() {
       </div>
     </main>
   );
+}
+
+function formatStage(stage: string) {
+  return stage.replaceAll("_", " ");
 }
 
 function BoundaryIcon({ icon, label }: { icon: ReactNode; label: string }) {

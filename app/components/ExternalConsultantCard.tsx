@@ -10,8 +10,10 @@ export function ExternalConsultantCard({
   response?: ExternalConsultantResponse | null;
   allowed?: boolean;
 }) {
+  const status: "neutral" | "passed" | "failed" = allowed === undefined ? "neutral" : allowed ? "passed" : "failed";
+  const badge = allowed === undefined ? "pending" : allowed ? "sanitized only" : "blocked";
   return (
-    <PipelineCard title="External consultant" status={allowed ? "passed" : "failed"} badge={allowed ? "sanitized only" : "blocked"}>
+    <PipelineCard title="External consultant" status={status} badge={badge}>
       {response ? (
         <div className="space-y-3 text-sm">
           <p className="leading-6">{response.advice}</p>

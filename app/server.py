@@ -7,10 +7,12 @@ Then point the Next.js API layer at http://localhost:8000/run.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Iterator
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -68,6 +70,9 @@ def health() -> dict:
         "status": "ok",
         "product": "ClosedAI",
         "python_pipeline": "ready",
+        "consult_pipeline": _consult_pipeline.model_status,
+        "internal_provider": _consult_pipeline.internal_provider,
+        "external_provider": _consult_pipeline.external_provider,
         "provider": _settings.provider,
         "model": _settings.model,
     }
@@ -77,6 +82,15 @@ def health() -> dict:
 def run(req: RunRequest) -> dict:
     result = _consult_pipeline.run(req.rawPrompt, req.mode)
     return result.model_dump()
+
+
+@app.post("/run/stream")
+def run_stream(req: RunRequest) -> StreamingResponse:
+    def events() -> Iterator[str]:
+        for event in _consult_pipeline.run_stream(req.rawPrompt, req.mode):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.post("/api/run")

@@ -116,9 +116,9 @@ class ExternalConsultantResponse(BaseModel):
 
 
 class PromptVersions(BaseModel):
-    deidPrompt: str = "deid_prompt:v3-local-llm-semantic-abstraction"
-    checkerPrompt: str = "checker_prompt:v3-local-llm-plus-deterministic-gate"
-    repairPrompt: str = "repair_prompt:v2-local-llm-repair-plus-safety"
+    deidPrompt: str = "deid_prompt:v4-trusted-llm-semantic-abstraction"
+    checkerPrompt: str = "checker_prompt:v4-trusted-llm-privacy-and-utility"
+    repairPrompt: str = "repair_prompt:v3-trusted-llm-retry-plus-safety"
 
 
 class WeaveMetadata(BaseModel):

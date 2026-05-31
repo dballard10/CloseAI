@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     const response = await fetch(`${PYTHON_SERVICE_URL}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ rawPrompt: body.rawPrompt, mode: "general" }),
       cache: "no-store"
     });
 
