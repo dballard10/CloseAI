@@ -194,6 +194,29 @@ GENERIC_SAFE_TERMS = {
     "ssri",
     "ssri medication",
     "symptoms",
+    "urgent care",
+    "clinic",
+    "patient relations",
+    "personal information",
+    "private health data",
+    "privacy violation",
+    "privacy incident",
+    "full name",
+    "date of birth",
+    "dob",
+    "insurance information",
+    "insurance details",
+    "policy number",
+    "contact information",
+    "old address",
+    "current email",
+    "old address-associated account",
+    "billing email",
+    "email account",
+    "medical situation",
+    "chest tightness",
+    "dizziness",
+    "symptoms out loud",
 }
 
 HEALTH_TERMS = [
@@ -319,6 +342,20 @@ def _is_generic_safe_term(value: str) -> bool:
     return normalized in GENERIC_SAFE_TERMS
 
 
+def _normalize_checker_leaked_items(items: Any, sanitized_prompt: str | None = None) -> list[str]:
+    leaked_items = []
+    for item in _as_str_list(items):
+        lower = item.lower()
+        if lower in {"none", "n/a", "na"}:
+            continue
+        if sanitized_prompt is not None and lower not in sanitized_prompt.lower():
+            continue
+        if _is_generic_safe_term(item):
+            continue
+        leaked_items.append(item)
+    return leaked_items
+
+
 def _infer_mode(raw_prompt: str, mode: ConsultMode) -> ConsultMode:
     # The web app no longer exposes a domain selector. Do not infer hidden modes
     # with substring heuristics; the LLM stages infer the situation from the
@@ -386,18 +423,19 @@ class PrivateConsultPipeline:
         system: str,
         user: str,
         schema: dict[str, Any] | None = None,
+        stage: str = "trusted.unknown",
     ) -> dict[str, Any] | None:
         if self.internal_provider == "wandb":
-            return self.wandb_internal.chat_json(system, user, schema)
+            return self.wandb_internal.chat_json(system, user, schema, stage=stage)
         if self.internal_provider == "ollama":
-            return self.local_llm.chat_json(system, user, schema)
+            return self.local_llm.chat_json(system, user, schema, stage=stage)
         return None
 
-    def _trusted_chat_text(self, system: str, user: str) -> str | None:
+    def _trusted_chat_text(self, system: str, user: str, stage: str = "trusted.unknown_text") -> str | None:
         if self.internal_provider == "wandb":
-            return self.wandb_internal.chat(system, user)
+            return self.wandb_internal.chat(system, user, stage=stage)
         if self.internal_provider == "ollama":
-            return self.local_llm.chat(system, user)
+            return self.local_llm.chat(system, user, stage=stage)
         return None
 
     def _trusted_llm_error(self) -> str:
@@ -549,7 +587,7 @@ class PrivateConsultPipeline:
             "for generic domain concepts that should be preserved."
         )
         user = f"Mode: {mode}\nRaw private prompt:\n{raw_prompt}"
-        data = self._trusted_chat_json(system, user, ENTITY_SCHEMA)
+        data = self._trusted_chat_json(system, user, ENTITY_SCHEMA, stage="trusted.entity_detection")
         entities: list[SensitiveEntity] = []
         if not data:
             return entities
@@ -623,6 +661,10 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local de-identification agent in ClosedAI. Create a semantic abstraction "
             "that preserves the user's task and useful reasoning context while removing direct identifiers. "
+            "Never copy the raw prompt verbatim. Rewrite it as a third-person semantic abstraction even when "
+            "there are no obvious names. Replace first-person phrasing with 'the user' or role-level wording, "
+            "generalize exact or relative dates to a recent/generalized timeline, and keep only category-level "
+            "sensitive facts needed for the task. "
             "Do not use placeholders like [PERSON]. Do not include names, organizations, addresses, emails, "
             "phone numbers, exact dates, exact locations, course IDs, project names, or specific medical "
             "diagnoses unless they are truly generic. detected_entities must list every identifier or "
@@ -634,7 +676,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt:\n{raw_prompt}\n\n"
             "Return a sanitized_prompt and preserved_concepts."
         )
-        data = self._trusted_chat_json(system, user, DEID_SCHEMA)
+        data = self._trusted_chat_json(system, user, DEID_SCHEMA, stage="trusted.deidentify")
         if not data:
             return None
         sanitized = str(data.get("sanitized_prompt") or data.get("sanitizedPrompt") or "").strip()
@@ -659,7 +701,10 @@ class PrivateConsultPipeline:
             "You are the trusted local de-identification agent in ClosedAI. You can see the raw private "
             "question, but an external model cannot. Produce a semantic abstraction that preserves the user's "
             "task and infer the domain from the raw question; the mode value is only an optional hint. Preserve "
-            "task and enough non-identifying context for useful advice. Remove or generalize all names, "
+            "task and enough non-identifying context for useful advice. Never copy the raw question verbatim. "
+            "Always rewrite in third person using 'the user', 'a person', or role-level wording. Generalize "
+            "first-person phrasing, exact or relative dates, exact employers, exact schools, account values, "
+            "addresses, emails, phone numbers, policy numbers, and rare identifiers. Remove or generalize all names, "
             "employers, schools, addresses, emails, phones, exact locations, exact dates, course/project IDs, "
             "rare quasi-identifiers, and overly specific medical/legal/HR/education details. Do not use bracket "
             "placeholders. Preserve generic role and domain context. Generic terms like employee, manager, "
@@ -683,7 +728,7 @@ class PrivateConsultPipeline:
                 "language for sensitive health/legal/HR details.\n"
             )
         user = f"Mode: {mode}\nRaw private question:\n{raw_prompt}\n{retry_context}"
-        data = self._trusted_chat_json(system, user, DEID_SCHEMA)
+        data = self._trusted_chat_json(system, user, DEID_SCHEMA, stage="trusted.deidentify_once")
         if not data:
             return None
 
@@ -727,17 +772,21 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local checker in ClosedAI. You can see both the raw private question and the "
             "sanitized prompt. Decide whether the sanitized prompt may be sent to an untrusted external model. "
-            "Check privacy leakage and utility in this single call. The main privacy goal is preventing "
-            "identification of the person or organization. Privacy fails when the sanitized prompt includes "
+            "Check privacy leakage and utility in this single call. Judge privacy based on the sanitized prompt; "
+            "use the raw private question only to understand whether concrete values were removed. The main "
+            "privacy goal is preventing identification of the person or organization. Privacy fails when the sanitized prompt includes "
             "names, employers, schools, street addresses, emails, phone numbers, exact locations, exact dates, "
             "course/project IDs, mapping-table artifacts, or rare combinations that could identify the person. "
             "Do not fail merely because the prompt preserves useful domain facts. Generic roles like employee, "
             "manager, landlord, clinician, doctor, student, tenant, and professor are not leaks. Generic or "
             "task-relevant facts like medical leave, panic attacks, prescribed medication, sertraline, symptoms, "
             "health condition, performance improvement plan, security deposit, academic integrity concern, "
-            "income level, and HR response are useful context, not identity leaks, unless combined with a direct "
-            "identifier or unusually rare detail. leakedItems must be exact substrings from the sanitized prompt "
-            "and should contain only identifying leaks. Utility should be high when the sanitized prompt "
+            "income level, urgent care, insurance issue, billing issue, complaint letter, full name, date of "
+            "birth, insurance details, contact information, old address, current email, and symptoms are useful "
+            "context labels, not identity leaks, unless the actual concrete value is present. For example, "
+            "'date of birth' is safe as a category label; 'April 4, 1994' is not. 'insurance details' is safe "
+            "as a category label; an actual policy number is not. leakedItems must be exact concrete values "
+            "or uniquely identifying details from the sanitized prompt, not category labels. Utility should be high when the sanitized prompt "
             "preserves the domain, role relationship, timeline, concern, and requested task without identifying "
             "the person. Utility fails only if the prompt is too vague to support useful advice. Return JSON only "
             "with passed, riskLevel, leakageTypes, leakedItems, explanation, recommendedFix, utilityScore, "
@@ -751,7 +800,7 @@ class PrivateConsultPipeline:
             f"Preserved concepts claimed by de-identification:\n{preserved_concepts}\n"
             f"Utility threshold: {self.utility_threshold}"
         )
-        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA)
+        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA, stage="trusted.checker")
         if not data:
             return None
 
@@ -760,13 +809,7 @@ class PrivateConsultPipeline:
             for item in _as_str_list(data.get("leakageTypes"))
             if item.lower() not in {"none", "no_leakage", "no leakage", "n/a", "na"}
         ]
-        leaked_items = [
-            item
-            for item in _as_str_list(data.get("leakedItems"))
-            if item.lower() not in {"none", "n/a", "na"}
-            and item.lower() in sanitized_prompt.lower()
-            and not _is_generic_safe_term(item)
-        ]
+        leaked_items = _normalize_checker_leaked_items(data.get("leakedItems"), sanitized_prompt)
         leakage_types = [
             item
             for item in leakage_types
@@ -901,7 +944,7 @@ class PrivateConsultPipeline:
             f"Detected private entities JSON:\n{[entity.model_dump() for entity in entities]}\n\n"
             f"Sanitized prompt to check:\n{sanitized_prompt}"
         )
-        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA)
+        data = self._trusted_chat_json(system, user, CHECKER_SCHEMA, stage="trusted.checker_legacy")
         if not data:
             return None
         leakage_types = [
@@ -909,12 +952,7 @@ class PrivateConsultPipeline:
             for item in _as_str_list(data.get("leakageTypes"))
             if item.lower() not in {"none", "no_leakage", "no leakage", "n/a", "na"}
         ]
-        leaked_items = [
-            item
-            for item in _as_str_list(data.get("leakedItems"))
-            if item.lower() not in {"none", "n/a", "na"}
-            and not _is_generic_safe_term(item)
-        ]
+        leaked_items = _normalize_checker_leaked_items(data.get("leakedItems"))
         leakage_types = [
             item
             for item in leakage_types
@@ -984,7 +1022,7 @@ class PrivateConsultPipeline:
             f"Checker result JSON:\n{checker.model_dump()}\n\n"
             f"Sanitized prompt to repair:\n{sanitized_prompt}"
         )
-        data = self._trusted_chat_json(system, user, REPAIR_SCHEMA)
+        data = self._trusted_chat_json(system, user, REPAIR_SCHEMA, stage="trusted.repair")
         if not data:
             return None
         repaired = str(data.get("repaired_sanitized_prompt") or "").strip()
@@ -1016,7 +1054,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt for trusted-local reference only:\n{raw_prompt}\n\n"
             "Write an improved_sanitized_prompt that preserves more useful non-identifying context."
         )
-        data = self._trusted_chat_json(system, user, UTILITY_RETRY_SCHEMA)
+        data = self._trusted_chat_json(system, user, UTILITY_RETRY_SCHEMA, stage="trusted.utility_retry")
         if not data:
             return None
         improved = str(data.get("improved_sanitized_prompt") or "").strip()
@@ -1080,7 +1118,7 @@ class PrivateConsultPipeline:
             f"Mode: {mode}\nExpected useful concepts: {expected}\n\n"
             f"Sanitized prompt:\n{sanitized_prompt}"
         )
-        data = self._trusted_chat_json(system, user, UTILITY_SCHEMA)
+        data = self._trusted_chat_json(system, user, UTILITY_SCHEMA, stage="trusted.utility")
         if not data:
             return None
         return UtilityResult(
@@ -1175,7 +1213,7 @@ class PrivateConsultPipeline:
             "JSON only with advice, suggestedStructure, outputFormat, finalizerInstructions, and risks."
         )
         user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
-        data = self.openai_external.chat_json(system, user, CONSULTANT_SCHEMA)
+        data = self.openai_external.chat_json(system, user, CONSULTANT_SCHEMA, stage="external.consultant")
         if not data:
             return None
         return ExternalConsultantResponse(
@@ -1197,7 +1235,7 @@ class PrivateConsultPipeline:
             "JSON only with advice, suggestedStructure, outputFormat, finalizerInstructions, and risks."
         )
         user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
-        data = self.wandb_external.chat_json(system, user, CONSULTANT_SCHEMA)
+        data = self.wandb_external.chat_json(system, user, CONSULTANT_SCHEMA, stage="external.consultant")
         if not data:
             return None
         return ExternalConsultantResponse(
@@ -1249,7 +1287,7 @@ class PrivateConsultPipeline:
             f"Raw private prompt:\n{raw_prompt}\n\n"
             f"External consultant advice JSON:\n{external.model_dump() if external else None}"
         )
-        data = self._trusted_chat_json(system, user, FINALIZER_SCHEMA)
+        data = self._trusted_chat_json(system, user, FINALIZER_SCHEMA, stage="trusted.finalizer_json")
         if data:
             final = str(data.get("finalAnswer") or "").strip()
             if final:
@@ -1263,7 +1301,7 @@ class PrivateConsultPipeline:
             "neutral, and practical. Return only the final answer text. Do not return JSON. Do not wrap the "
             "answer in a markdown code fence."
         )
-        text = self._trusted_chat_text(text_system, user)
+        text = self._trusted_chat_text(text_system, user, stage="trusted.finalizer_text")
         if not text:
             return None
         return _clean_finalizer_text(text)

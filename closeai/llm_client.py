@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 
-from .observability import op
+from .observability import log_llm_call, op
 
 
 class ClosedModelClient:
@@ -46,11 +46,13 @@ class ClosedModelClient:
     def _openai(self, prompt: str, system: str | None, wandb: bool = False) -> str:
         from openai import OpenAI
 
+        provider = "wandb" if wandb else "openai"
+        endpoint = os.getenv("WANDB_INFERENCE_BASE_URL", "https://api.inference.wandb.ai/v1") if wandb else None
         if wandb:
             # NB: use a dedicated var, NOT WANDB_BASE_URL — that one is reserved by
             # wandb/weave to reach the W&B *platform* and would break tracing.
             client = OpenAI(
-                base_url=os.getenv("WANDB_INFERENCE_BASE_URL", "https://api.inference.wandb.ai/v1"),
+                base_url=endpoint,
                 api_key=os.getenv("WANDB_API_KEY"),
             )
         else:
@@ -59,38 +61,111 @@ class ClosedModelClient:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        resp = client.chat.completions.create(model=self.model, messages=messages)
-        return resp.choices[0].message.content or ""
+        try:
+            resp = client.chat.completions.create(model=self.model, messages=messages)
+            content = resp.choices[0].message.content or ""
+            log_llm_call(
+                provider=provider,
+                model=self.model,
+                stage="legacy.closed_model",
+                system=system or "",
+                user=prompt,
+                response=content,
+                endpoint=endpoint,
+            )
+            return content
+        except Exception as exc:
+            log_llm_call(
+                provider=provider,
+                model=self.model,
+                stage="legacy.closed_model",
+                system=system or "",
+                user=prompt,
+                error=str(exc),
+                endpoint=endpoint,
+            )
+            raise
 
     def _anthropic(self, prompt: str, system: str | None) -> str:
         import anthropic
 
         client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model=self.model,
-            max_tokens=1024,
-            system=system or "You are a helpful assistant.",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return "".join(block.text for block in resp.content if block.type == "text")
+        try:
+            resp = client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                system=system or "You are a helpful assistant.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            content = "".join(block.text for block in resp.content if block.type == "text")
+            log_llm_call(
+                provider="anthropic",
+                model=self.model,
+                stage="legacy.closed_model",
+                system=system or "You are a helpful assistant.",
+                user=prompt,
+                response=content,
+            )
+            return content
+        except Exception as exc:
+            log_llm_call(
+                provider="anthropic",
+                model=self.model,
+                stage="legacy.closed_model",
+                system=system or "You are a helpful assistant.",
+                user=prompt,
+                error=str(exc),
+            )
+            raise
 
     def _ollama(self, prompt: str, system: str | None) -> str:
         import requests
 
         model = self._resolve_ollama_model()
         if not model:
+            log_llm_call(
+                provider="ollama",
+                model=self.model,
+                stage="legacy.closed_model",
+                system=system or "",
+                user=prompt,
+                error="no local model available",
+                endpoint=self.ollama_host,
+            )
             return "[ollama provider — no local model available]"
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        resp = requests.post(
-            f"{self.ollama_host}/api/chat",
-            json={"model": model, "messages": messages, "stream": False},
-            timeout=180,
-        )
-        resp.raise_for_status()
-        return resp.json().get("message", {}).get("content", "")
+        try:
+            resp = requests.post(
+                f"{self.ollama_host}/api/chat",
+                json={"model": model, "messages": messages, "stream": False},
+                timeout=180,
+            )
+            resp.raise_for_status()
+            content = resp.json().get("message", {}).get("content", "")
+            log_llm_call(
+                provider="ollama",
+                model=model,
+                stage="legacy.closed_model",
+                system=system or "",
+                user=prompt,
+                response=content,
+                endpoint=self.ollama_host,
+            )
+            return content
+        except Exception as exc:
+            log_llm_call(
+                provider="ollama",
+                model=model,
+                stage="legacy.closed_model",
+                system=system or "",
+                user=prompt,
+                error=str(exc),
+                endpoint=self.ollama_host,
+            )
+            raise
 
     def _resolve_ollama_model(self) -> str | None:
         """Use the configured model if installed, else fall back to an installed

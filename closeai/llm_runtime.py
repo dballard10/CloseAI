@@ -14,6 +14,8 @@ from typing import Any
 
 import requests
 
+from .observability import log_llm_call
+
 
 JSON_OBJECT_SCHEMA = {
     "type": "object",
@@ -68,19 +70,72 @@ class LocalLLM:
         base = requested.split(":")[0]
         return next((model for model in models if model.split(":")[0] == base), None)
 
-    def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        raw = self.chat(system, user, schema=schema or JSON_OBJECT_SCHEMA)
+    def chat_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any] | None = None,
+        stage: str = "trusted.ollama.json",
+    ) -> dict[str, Any] | None:
+        schema = schema or JSON_OBJECT_SCHEMA
+        raw = self.chat(system, user, schema=schema, stage=stage, json_mode=True, trace=False)
         if raw is None:
+            log_llm_call(
+                provider="ollama",
+                model=self._resolved_model or self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                response=None,
+                parsed_response=None,
+                error=self.last_error,
+                json_mode=True,
+                schema=schema,
+                endpoint=self.host,
+            )
             return None
         parsed = parse_json_object(raw)
         if parsed is None:
             self.last_error = _non_json_error(raw)
+        log_llm_call(
+            provider="ollama",
+            model=self._resolved_model or self.model,
+            stage=stage,
+            system=system,
+            user=user,
+            response=raw,
+            parsed_response=parsed,
+            error=self.last_error if parsed is None else None,
+            json_mode=True,
+            schema=schema,
+            endpoint=self.host,
+        )
         return parsed
 
-    def chat(self, system: str, user: str, schema: dict[str, Any] | None = None) -> str | None:
+    def chat(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any] | None = None,
+        stage: str = "trusted.ollama.text",
+        json_mode: bool = False,
+        trace: bool = True,
+    ) -> str | None:
         model = self.resolve_model()
         if not model:
             self.last_error = f"No Ollama model available for {self.model}"
+            if trace:
+                log_llm_call(
+                    provider="ollama",
+                    model=self.model,
+                    stage=stage,
+                    system=system,
+                    user=user,
+                    error=self.last_error,
+                    json_mode=json_mode,
+                    schema=schema,
+                    endpoint=self.host,
+                )
             return None
         payload: dict[str, Any] = {
             "model": model,
@@ -98,9 +153,34 @@ class LocalLLM:
             response.raise_for_status()
             content = response.json().get("message", {}).get("content", "")
             self.last_error = None
-            return strip_thinking(content)
+            content = strip_thinking(content)
+            if trace:
+                log_llm_call(
+                    provider="ollama",
+                    model=model,
+                    stage=stage,
+                    system=system,
+                    user=user,
+                    response=content,
+                    json_mode=json_mode,
+                    schema=schema,
+                    endpoint=self.host,
+                )
+            return content
         except Exception as exc:
             self.last_error = str(exc)
+            if trace:
+                log_llm_call(
+                    provider="ollama",
+                    model=model,
+                    stage=stage,
+                    system=system,
+                    user=user,
+                    error=self.last_error,
+                    json_mode=json_mode,
+                    schema=schema,
+                    endpoint=self.host,
+                )
             return None
 
 
@@ -119,9 +199,18 @@ class WANDbInferenceClient:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, system: str, user: str) -> str | None:
+    def chat(self, system: str, user: str, stage: str = "trusted.wandb.text") -> str | None:
         if not self.api_key:
             self.last_error = "WANDB_API_KEY is not set"
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                endpoint=self.base_url,
+            )
             return None
         try:
             from openai import OpenAI
@@ -137,14 +226,49 @@ class WANDbInferenceClient:
             )
             content = strip_thinking(response.choices[0].message.content or "")
             self.last_error = None
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                response=content,
+                endpoint=self.base_url,
+            )
             return content or None
         except Exception as exc:
             self.last_error = str(exc)
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                endpoint=self.base_url,
+            )
             return None
 
-    def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def chat_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any] | None = None,
+        stage: str = "wandb.json",
+    ) -> dict[str, Any] | None:
         if not self.api_key:
             self.last_error = "WANDB_API_KEY is not set"
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                json_mode=True,
+                schema=schema,
+                endpoint=self.base_url,
+            )
             return None
         try:
             from openai import OpenAI
@@ -165,9 +289,33 @@ class WANDbInferenceClient:
                 self.last_error = _non_json_error(content)
             else:
                 self.last_error = None
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                response=content,
+                parsed_response=parsed,
+                error=self.last_error if parsed is None else None,
+                json_mode=True,
+                schema=schema,
+                endpoint=self.base_url,
+            )
             return parsed
         except Exception as exc:
             self.last_error = str(exc)
+            log_llm_call(
+                provider="wandb",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                json_mode=True,
+                schema=schema,
+                endpoint=self.base_url,
+            )
             return None
 
 
@@ -185,9 +333,25 @@ class OpenAIExternalClient:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    def chat_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any] | None = None,
+        stage: str = "external.openai.json",
+    ) -> dict[str, Any] | None:
         if not self.api_key:
             self.last_error = "OPENAI_API_KEY is not set"
+            log_llm_call(
+                provider="openai",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                json_mode=True,
+                schema=schema,
+            )
             return None
         try:
             from openai import OpenAI
@@ -207,9 +371,31 @@ class OpenAIExternalClient:
                 self.last_error = _non_json_error(content)
             else:
                 self.last_error = None
+            log_llm_call(
+                provider="openai",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                response=content,
+                parsed_response=parsed,
+                error=self.last_error if parsed is None else None,
+                json_mode=True,
+                schema=schema,
+            )
             return parsed
         except Exception as exc:
             self.last_error = str(exc)
+            log_llm_call(
+                provider="openai",
+                model=self.model,
+                stage=stage,
+                system=system,
+                user=user,
+                error=self.last_error,
+                json_mode=True,
+                schema=schema,
+            )
             return None
 
 

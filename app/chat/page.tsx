@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type {
   ChatApproveResponse,
@@ -76,6 +78,27 @@ function formatTime(value: string) {
 function titleFromPrompt(prompt: string) {
   const compact = prompt.replace(/\s+/g, " ").trim();
   return compact.length > 42 ? `${compact.slice(0, 39)}...` : compact || "New chat";
+}
+
+function buildPromptWithHistory(messages: ChatMessage[], latestUserMessage: string) {
+  if (messages.length === 0) {
+    return latestUserMessage;
+  }
+
+  const transcript = messages
+    .map((message) => {
+      const speaker = message.role === "user" ? "User" : "Assistant";
+      return `${speaker} (${new Date(message.timestamp).toISOString()}):\n${message.content}`;
+    })
+    .join("\n\n");
+
+  return [
+    "Conversation history in this chat:",
+    transcript,
+    "Latest user message:",
+    `User:\n${latestUserMessage}`,
+    "Answer the latest user message using the prior conversation as context."
+  ].join("\n\n");
 }
 
 async function postJson<T extends object>(url: string, body: Record<string, unknown>): Promise<T> {
@@ -270,6 +293,7 @@ export default function ChatPage() {
     if (!rawPrompt || approval || stage === "classifying" || stage === "consulting" || stage === "revising" || stage === "finalizing") {
       return;
     }
+    const rawPromptWithHistory = buildPromptWithHistory(activeSession?.messages ?? [], rawPrompt);
 
     setInput("");
     setFeedback("");
@@ -287,7 +311,9 @@ export default function ChatPage() {
 
     try {
       setStage("checking");
-      const classified = await postJson<ChatClassificationResponse>("/api/classify", { rawPrompt });
+      const classified = await postJson<ChatClassificationResponse>("/api/classify", {
+        rawPrompt: rawPromptWithHistory
+      });
       if (approvalRequired) {
         setApproval(classified);
         setStage("review");
@@ -652,7 +678,11 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               : "border border-white/10 bg-[#101720] text-zinc-100"
           ].join(" ")}
         >
-          <div className="whitespace-pre-wrap">{message.content}</div>
+          {user ? (
+            <div className="whitespace-pre-wrap">{message.content}</div>
+          ) : (
+            <MarkdownMessage content={message.content} />
+          )}
           {!user && message.weaveTraceUrl ? (
             <a
               href={message.weaveTraceUrl}
@@ -676,6 +706,65 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ children, ...props }) => (
+          <a
+            {...props}
+            target="_blank"
+            rel="noreferrer"
+            className="text-cyan-100 underline decoration-cyan-200/35 underline-offset-2 hover:text-cyan-50"
+          >
+            {children}
+          </a>
+        ),
+        blockquote: ({ children }) => (
+          <blockquote className="my-3 border-l-2 border-cyan-200/40 pl-3 text-zinc-300">
+            {children}
+          </blockquote>
+        ),
+        code: ({ children, className }) => {
+          const inline = !className;
+          return inline ? (
+            <code className="rounded border border-white/10 bg-black/25 px-1.5 py-0.5 text-[0.9em] text-cyan-100">
+              {children}
+            </code>
+          ) : (
+            <code className={className}>{children}</code>
+          );
+        },
+        h1: ({ children }) => <h1 className="mb-3 text-xl font-semibold text-zinc-50">{children}</h1>,
+        h2: ({ children }) => <h2 className="mb-2 mt-4 text-lg font-semibold text-zinc-50">{children}</h2>,
+        h3: ({ children }) => <h3 className="mb-2 mt-3 text-base font-semibold text-zinc-50">{children}</h3>,
+        hr: () => <hr className="my-4 border-white/10" />,
+        li: ({ children }) => <li className="pl-1">{children}</li>,
+        ol: ({ children }) => <ol className="my-3 list-decimal space-y-1.5 pl-5">{children}</ol>,
+        p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+        pre: ({ children }) => (
+          <pre className="my-3 overflow-x-auto rounded-lg border border-white/10 bg-black/30 p-3 text-xs leading-5 text-zinc-100">
+            {children}
+          </pre>
+        ),
+        table: ({ children }) => (
+          <div className="my-3 overflow-x-auto rounded-lg border border-white/10">
+            <table className="w-full border-collapse text-left text-sm">{children}</table>
+          </div>
+        ),
+        tbody: ({ children }) => <tbody className="divide-y divide-white/10">{children}</tbody>,
+        td: ({ children }) => <td className="px-3 py-2 text-zinc-300">{children}</td>,
+        th: ({ children }) => <th className="bg-white/[0.04] px-3 py-2 font-semibold text-zinc-100">{children}</th>,
+        thead: ({ children }) => <thead className="border-b border-white/10">{children}</thead>,
+        ul: ({ children }) => <ul className="my-3 list-disc space-y-1.5 pl-5">{children}</ul>
+      }}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }
 

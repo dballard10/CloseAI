@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from closeai.private_consult import PrivateConsultPipeline, should_call_external
+from closeai.private_consult import (
+    PrivateConsultPipeline,
+    _normalize_checker_leaked_items,
+    should_call_external,
+)
 
 
 def _pipeline() -> PrivateConsultPipeline:
@@ -37,3 +41,27 @@ def test_legal_example_does_not_send_raw_identifiers():
     assert "Cambridge" not in outbound
     assert result.finalCheckerResult.passed is True
     assert should_call_external(result.finalCheckerResult, result.utilityResult) is True
+
+
+def test_checker_does_not_treat_privacy_category_labels_as_leaks():
+    sanitized = (
+        "A worker at a company visited an urgent care clinic after experiencing symptoms during work. "
+        "A staff member allegedly spoke personal information out loud, including full name, date of birth, "
+        "insurance details, symptoms, and contact information. The user wants a firm complaint letter asking "
+        "the clinic to correct contact information, explain what happened, assess whether it was a privacy "
+        "violation, and describe prevention steps."
+    )
+
+    leaked = _normalize_checker_leaked_items(
+        [
+            "full name",
+            "date of birth",
+            "insurance details",
+            "symptoms",
+            "contact information",
+            "actual-policy-123",
+        ],
+        sanitized,
+    )
+
+    assert leaked == []

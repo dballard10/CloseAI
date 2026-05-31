@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 
-from ..observability import op
+from ..observability import log_llm_call, op
 from ..schemas import Span
 
 _SYSTEM_PROMPT = """You are a privacy detection agent. Your job is to find every \
@@ -181,8 +181,31 @@ class LLMDetector:
                 timeout=120,
             )
             resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "")
+            content = resp.json().get("message", {}).get("content", "")
+            log_llm_call(
+                provider="ollama",
+                model=model,
+                stage="legacy.local_detector",
+                system=_SYSTEM_PROMPT,
+                user=text,
+                response=content,
+                json_mode=True,
+                schema=_FORMAT_SCHEMA,
+                endpoint=self.host,
+            )
+            return content
         except Exception as exc:  # pragma: no cover - network/Ollama down
+            log_llm_call(
+                provider="ollama",
+                model=model,
+                stage="legacy.local_detector",
+                system=_SYSTEM_PROMPT,
+                user=text,
+                error=str(exc),
+                json_mode=True,
+                schema=_FORMAT_SCHEMA,
+                endpoint=self.host,
+            )
             print(f"[LLMDetector] Ollama call failed ({exc}); skipping LLM detection.")
             return ""
 
