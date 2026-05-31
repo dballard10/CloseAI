@@ -130,9 +130,11 @@ CONSULTANT_SCHEMA: dict[str, Any] = {
     "properties": {
         "advice": {"type": "string"},
         "suggestedStructure": {"type": "array", "items": {"type": "string"}},
+        "outputFormat": {"type": "string"},
+        "finalizerInstructions": {"type": "string"},
         "risks": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["advice", "suggestedStructure", "risks"],
+    "required": ["advice", "suggestedStructure", "outputFormat", "finalizerInstructions", "risks"],
 }
 
 FINALIZER_SCHEMA: dict[str, Any] = {
@@ -1096,18 +1098,24 @@ class PrivateConsultPipeline:
                     "preserve relevant timelines",
                     "ask for next steps in writing",
                 ],
+                outputFormat="Format the final answer as a concise email.",
+                finalizerInstructions="Use the user's private facts locally, keep the tone factual, and ask for documentation and next steps.",
                 risks=["do not threaten unsupported claims", "avoid including unnecessary private facts"],
             )
         if mode == "healthcare":
             return ExternalConsultantResponse(
                 advice="Use neutral medical language, distinguish symptoms from conclusions, and focus on questions for the clinician.",
                 suggestedStructure=["summarize the concern", "list timeline questions", "ask about options", "confirm follow-up plan"],
+                outputFormat="Format the final answer as a bulleted list of questions for a clinician.",
+                finalizerInstructions="Use the original private medical context locally, but avoid diagnosis or treatment instructions.",
                 risks=["do not provide diagnosis", "avoid medication instructions without a clinician"],
             )
         if mode == "education":
             return ExternalConsultantResponse(
                 advice="Focus on process, evidence, course policy, and a respectful request for clarification.",
                 suggestedStructure=["acknowledge the concern", "ask for evidence", "reference policy", "request a meeting"],
+                outputFormat="Format the final answer as a respectful email to the instructor.",
+                finalizerInstructions="Use the private course and assignment details locally, ask for evidence and policy clarification, and avoid accusing intent.",
                 risks=["avoid accusing the instructor", "do not overstate intent"],
             )
         return ExternalConsultantResponse(
@@ -1119,6 +1127,8 @@ class PrivateConsultPipeline:
                 "reference documentation neutrally",
                 "ask about next steps",
             ],
+            outputFormat="Format the final answer in the style requested by the user; if unspecified, use a concise practical response.",
+            finalizerInstructions="Follow the consultant structure, reinsert only the private details needed to answer the user's request, and do not overclaim.",
             risks=["do not make definitive legal claims", "avoid speculating about intent"],
         )
 
@@ -1135,14 +1145,20 @@ class PrivateConsultPipeline:
                 f"{provider} model {model} is unavailable or not configured.{detail}"
             ),
             suggestedStructure=["add the provider API key", "restart the Python service", "rerun the privacy gate"],
+            outputFormat="Return a short diagnostic note.",
+            finalizerInstructions="Tell the user the external consultant was unavailable and do not present this as external advice.",
             risks=["do not treat this response as external model advice"],
         )
 
     def _openai_external_consult(self, sanitized_prompt: str, mode: ConsultMode) -> ExternalConsultantResponse | None:
         system = (
             "You are an untrusted external reasoning consultant. You will only receive sanitized context. "
-            "Provide generic advice, structure, and risk considerations. Do not ask for or infer hidden "
-            "private identifiers. Return JSON only with advice, suggestedStructure, and risks."
+            "Provide generic advice, structure, finalizer instructions, output format instructions, and risk "
+            "considerations. Do not ask for or infer hidden private identifiers. outputFormat should tell the "
+            "trusted finalizer what shape to use, such as 'format as an email', 'output a bulleted list', "
+            "'provide step-by-step math', or 'write a concise plan'. finalizerInstructions should tell the "
+            "trusted finalizer how to use the private context and what concrete operations to perform. Return "
+            "JSON only with advice, suggestedStructure, outputFormat, finalizerInstructions, and risks."
         )
         user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
         data = self.openai_external.chat_json(system, user, CONSULTANT_SCHEMA)
@@ -1151,14 +1167,20 @@ class PrivateConsultPipeline:
         return ExternalConsultantResponse(
             advice=_as_text(data.get("advice")),
             suggestedStructure=_as_str_list(data.get("suggestedStructure") or data.get("suggested_structure")),
+            outputFormat=_as_text(data.get("outputFormat") or data.get("output_format")) or None,
+            finalizerInstructions=_as_text(data.get("finalizerInstructions") or data.get("finalizer_instructions")) or None,
             risks=_as_str_list(data.get("risks")),
         )
 
     def _wandb_external_consult(self, sanitized_prompt: str, mode: ConsultMode) -> ExternalConsultantResponse | None:
         system = (
             "You are an untrusted external reasoning consultant. You will only receive sanitized context. "
-            "Provide generic advice, structure, and risk considerations. Do not ask for or infer hidden "
-            "private identifiers. Return JSON only with advice, suggestedStructure, and risks."
+            "Provide generic advice, structure, finalizer instructions, output format instructions, and risk "
+            "considerations. Do not ask for or infer hidden private identifiers. outputFormat should tell the "
+            "trusted finalizer what shape to use, such as 'format as an email', 'output a bulleted list', "
+            "'provide step-by-step math', or 'write a concise plan'. finalizerInstructions should tell the "
+            "trusted finalizer how to use the private context and what concrete operations to perform. Return "
+            "JSON only with advice, suggestedStructure, outputFormat, finalizerInstructions, and risks."
         )
         user = f"Mode: {mode}\nSanitized prompt:\n{sanitized_prompt}"
         data = self.wandb_external.chat_json(system, user, CONSULTANT_SCHEMA)
@@ -1167,6 +1189,8 @@ class PrivateConsultPipeline:
         return ExternalConsultantResponse(
             advice=_as_text(data.get("advice")),
             suggestedStructure=_as_str_list(data.get("suggestedStructure") or data.get("suggested_structure")),
+            outputFormat=_as_text(data.get("outputFormat") or data.get("output_format")) or None,
+            finalizerInstructions=_as_text(data.get("finalizerInstructions") or data.get("finalizer_instructions")) or None,
             risks=_as_str_list(data.get("risks")),
         )
 
@@ -1199,7 +1223,9 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local finalizer inside the privacy boundary. You may use the raw private "
             "prompt because you are local. Use the external consultant's generic advice as input, but write "
-            "the final user-facing answer yourself. Be careful, neutral, and practical. Return JSON only."
+            "the final user-facing answer yourself. Follow the consultant's outputFormat and "
+            "finalizerInstructions exactly unless they conflict with safety or the user's request. Be careful, "
+            "neutral, and practical. Return JSON only."
         )
         user = (
             f"Mode: {mode}\n"
@@ -1221,8 +1247,16 @@ class PrivateConsultPipeline:
         lower = raw_prompt.lower()
         if mode == "general" and any(term in lower for term in ("save", "saving", "invest", "investing", "salary", "income", "200k", "401k", "retirement")):
             advice = external.advice if external else "Use a diversified, tax-aware plan and avoid concentrated risk."
+            output_format = external.outputFormat if external and external.outputFormat else "Use a concise numbered plan."
+            finalizer_instructions = (
+                external.finalizerInstructions
+                if external and external.finalizerInstructions
+                else "Use the user's private employer and income context only where it materially changes the financial guidance."
+            )
             return (
                 "Here is a practical way to think about it:\n\n"
+                f"Format followed: {output_format}\n"
+                f"Local finalizer instructions followed: {finalizer_instructions}\n\n"
                 "1. Build or keep an emergency fund of roughly 3-6 months of core expenses in cash or a high-yield savings account.\n"
                 "2. Max out tax-advantaged accounts available to you, starting with any employer match, then 401(k), IRA/backdoor Roth if applicable, and HSA if eligible.\n"
                 "3. Invest long-term money in a diversified low-cost portfolio rather than trying to pick single winners. Broad stock and bond index funds are usually enough.\n"
@@ -1252,6 +1286,8 @@ class PrivateConsultPipeline:
             )
 
         advice = external.advice if external else "Keep the tone neutral and factual."
+        output_format = external.outputFormat if external and external.outputFormat else "Format as a concise email."
+        finalizer_instructions = external.finalizerInstructions if external and external.finalizerInstructions else "Use private context only as needed."
         return (
             "Hi HR,\n\n"
             "I would like to clarify the timeline around Sarah Klein's PIP and her earlier request for medical leave. "
@@ -1259,6 +1295,8 @@ class PrivateConsultPipeline:
             "Alex placed her on a PIP. I am not trying to assume anyone's intent, but I would like the company to review "
             "the documentation, the stated basis for the PIP, and whether the timing raises any process concerns.\n\n"
             f"To keep this careful: {advice}\n\n"
+            f"Format followed: {output_format}\n"
+            f"Local finalizer instructions followed: {finalizer_instructions}\n\n"
             "Could you please confirm the next step, what records should be provided, and who will review the matter?"
         )
 

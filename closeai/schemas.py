@@ -112,6 +112,8 @@ class UtilityResult(BaseModel):
 class ExternalConsultantResponse(BaseModel):
     advice: str
     suggestedStructure: list[str] = Field(default_factory=list)
+    outputFormat: str | None = None
+    finalizerInstructions: str | None = None
     risks: list[str] = Field(default_factory=list)
 
 

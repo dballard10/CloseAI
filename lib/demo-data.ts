@@ -64,6 +64,9 @@ export const fallbackResponse: RunResponse = {
   externalConsultantResponse: {
     advice:
       "Focus on the timeline, neutral tone, documentation, clarification, and avoiding legal conclusions. Ask for the specific basis of the warning and avoid speculating about intent.",
+    outputFormat: "Format the final answer as a concise email to HR.",
+    finalizerInstructions:
+      "Use the original names and private timeline locally, ask for clarification and documentation, and avoid making legal conclusions.",
     suggestedStructure: [
       "acknowledge the concern",
       "state the timeline neutrally",

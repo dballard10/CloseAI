@@ -31,6 +31,8 @@ export type UtilityResult = {
 export type ExternalConsultantResponse = {
   advice: string;
   suggestedStructure: string[];
+  outputFormat?: string | null;
+  finalizerInstructions?: string | null;
   risks: string[];
 };
 

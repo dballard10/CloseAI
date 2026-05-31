@@ -17,6 +17,18 @@ export function ExternalConsultantCard({
       {response ? (
         <div className="space-y-3 text-sm">
           <p className="leading-6">{response.advice}</p>
+          {response.outputFormat ? (
+            <div className="rounded-md border bg-muted/40 p-3">
+              <div className="mb-1 text-xs font-medium uppercase text-muted-foreground">Output format</div>
+              <p className="leading-6">{response.outputFormat}</p>
+            </div>
+          ) : null}
+          {response.finalizerInstructions ? (
+            <div className="rounded-md border bg-muted/40 p-3">
+              <div className="mb-1 text-xs font-medium uppercase text-muted-foreground">Finalizer instructions</div>
+              <p className="leading-6">{response.finalizerInstructions}</p>
+            </div>
+          ) : null}
           <div>
             <div className="mb-1 text-xs font-medium uppercase text-muted-foreground">Suggested structure</div>
             <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
