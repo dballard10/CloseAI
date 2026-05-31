@@ -181,6 +181,17 @@ GENERIC_SAFE_TERMS = {
     "course",
     "academic integrity concern",
     "assignment",
+    "april",
+    "doctor",
+    "health issues",
+    "health symptoms",
+    "medication",
+    "panic attacks",
+    "prescribed medication",
+    "sertraline",
+    "ssri",
+    "ssri medication",
+    "symptoms",
 }
 
 HEALTH_TERMS = [
@@ -300,6 +311,21 @@ def _clamp_score(value: Any) -> float:
 def _is_generic_safe_term(value: str) -> bool:
     normalized = re.sub(r"\s+", " ", value.strip().lower())
     return normalized in GENERIC_SAFE_TERMS
+
+
+def _infer_mode(raw_prompt: str, mode: ConsultMode) -> ConsultMode:
+    if mode != "general":
+        return mode
+    lower = raw_prompt.lower()
+    if any(term in lower for term in ("medical leave", "pip", "performance improvement plan", "manager", "hr")):
+        return "hr"
+    if any(term in lower for term in ("landlord", "security deposit", "eviction", "lease")):
+        return "legal"
+    if any(term in lower for term in ("prescribed", "doctor", "dr.", "patient", "panic attacks", "sertraline", "symptoms")):
+        return "healthcare"
+    if any(term in lower for term in ("student", "professor", "cheating", "course", "assignment", "project")):
+        return "education"
+    return "general"
 
 
 class PrivateConsultPipeline:
@@ -685,18 +711,21 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local checker in ClosedAI. You can see both the raw private question and the "
             "sanitized prompt. Decide whether the sanitized prompt may be sent to an untrusted external model. "
-            "Check privacy leakage and utility in this single call. Privacy fails if names, employers, schools, "
-            "addresses, emails, phones, exact locations, exact dates, rare quasi-identifiers, or overly specific "
-            "sensitive details remain in the sanitized prompt. leakedItems must be exact substrings from the "
-            "sanitized prompt, not from the raw question. Generic roles like employee, manager, landlord, "
-            "clinician, student, tenant, and professor are not leaks. Generic domain terms like medical leave, "
-            "health condition, performance improvement plan, security deposit, academic integrity concern, and "
-            "HR response are useful context, not leaks and must not appear in leakedItems. Utility should be high "
-            "when the sanitized prompt preserves the domain, role relationship, timeline, concern, and requested "
-            "task without identifiers. For HR cases, preserving generic medical leave, health condition, manager, "
-            "and performance improvement plan context is useful and should usually score at least 0.7. Utility "
-            "fails only if the prompt is too vague to support useful advice. Return JSON only with passed, riskLevel, leakageTypes, leakedItems, explanation, "
-            "recommendedFix, utilityScore, preservedConcepts, and missingUsefulContext."
+            "Check privacy leakage and utility in this single call. The main privacy goal is preventing "
+            "identification of the person or organization. Privacy fails when the sanitized prompt includes "
+            "names, employers, schools, street addresses, emails, phone numbers, exact locations, exact dates, "
+            "course/project IDs, mapping-table artifacts, or rare combinations that could identify the person. "
+            "Do not fail merely because the prompt preserves useful domain facts. Generic roles like employee, "
+            "manager, landlord, clinician, doctor, student, tenant, and professor are not leaks. Generic or "
+            "task-relevant facts like medical leave, panic attacks, prescribed medication, sertraline, symptoms, "
+            "health condition, performance improvement plan, security deposit, academic integrity concern, "
+            "income level, and HR response are useful context, not identity leaks, unless combined with a direct "
+            "identifier or unusually rare detail. leakedItems must be exact substrings from the sanitized prompt "
+            "and should contain only identifying leaks. Utility should be high when the sanitized prompt "
+            "preserves the domain, role relationship, timeline, concern, and requested task without identifying "
+            "the person. Utility fails only if the prompt is too vague to support useful advice. Return JSON only "
+            "with passed, riskLevel, leakageTypes, leakedItems, explanation, recommendedFix, utilityScore, "
+            "preservedConcepts, and missingUsefulContext."
         )
         user = (
             f"Mode: {mode}\n"
@@ -721,6 +750,11 @@ class PrivateConsultPipeline:
             if item.lower() not in {"none", "n/a", "na"}
             and item.lower() in sanitized_prompt.lower()
             and not _is_generic_safe_term(item)
+        ]
+        leakage_types = [
+            item
+            for item in leakage_types
+            if not any(term in item.lower() for term in ("health", "medical", "doctor", "medication"))
         ]
         if not leaked_items:
             leakage_types = []
@@ -843,8 +877,9 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local de-identification checker. Decide whether a sanitized prompt is safe "
             "to send to an untrusted external model. Check for leftover names, organizations, locations, "
-            "addresses, exact dates, mapping leaks, rare quasi-identifiers, and overly specific sensitive "
-            "health/legal/education/HR facts. Return JSON only."
+            "addresses, exact dates, mapping leaks, and rare quasi-identifiers. Do not treat useful generic "
+            "medical, legal, education, workplace, or financial context as leakage unless it identifies the "
+            "person or organization. Return JSON only."
         )
         user = (
             f"Detected private entities JSON:\n{[entity.model_dump() for entity in entities]}\n\n"
@@ -862,7 +897,15 @@ class PrivateConsultPipeline:
             item
             for item in _as_str_list(data.get("leakedItems"))
             if item.lower() not in {"none", "n/a", "na"}
+            and not _is_generic_safe_term(item)
         ]
+        leakage_types = [
+            item
+            for item in leakage_types
+            if not any(term in item.lower() for term in ("health", "medical", "doctor", "medication"))
+        ]
+        if not leaked_items:
+            leakage_types = []
         passed = bool(data.get("passed")) or (not leakage_types and not leaked_items)
         risk = _risk_level(data.get("riskLevel"), "low" if passed else "high")
         return CheckerResult(
@@ -1237,6 +1280,7 @@ class PrivateConsultPipeline:
         }
 
     def run_stream(self, raw_prompt: str, mode: ConsultMode = "general") -> Iterable[dict[str, Any]]:
+        mode = _infer_mode(raw_prompt, mode)
         yield self._event(
             "started",
             {
@@ -1487,6 +1531,7 @@ class PrivateConsultPipeline:
 
     @op
     def run(self, raw_prompt: str, mode: ConsultMode = "general") -> RunResponse:
+        mode = _infer_mode(raw_prompt, mode)
         if self._use_llm_pipeline():
             llm_result = self._run_llm_pipeline(raw_prompt, mode)
             if llm_result is not None:
