@@ -8,7 +8,7 @@ clean, structured inputs/outputs to render in its trace tree.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -88,3 +88,70 @@ class PipelineResult(BaseModel):
     n_described: int = 0
     n_dropped: int = 0
     n_kept: int = 0
+
+
+RiskLevel = Literal["low", "medium", "high"]
+ConsultMode = Literal["hr", "legal", "healthcare", "education", "general"]
+
+
+class SensitiveEntity(BaseModel):
+    text: str
+    type: str
+    risk: RiskLevel
+    replacementHint: str | None = None
+
+
+class CheckerResult(BaseModel):
+    passed: bool
+    riskLevel: RiskLevel
+    leakageTypes: list[str] = Field(default_factory=list)
+    leakedItems: list[str] = Field(default_factory=list)
+    explanation: str | None = None
+    recommendedFix: str | None = None
+
+
+class UtilityResult(BaseModel):
+    utilityScore: float
+    preservedConcepts: list[str] = Field(default_factory=list)
+    missingUsefulContext: list[str] = Field(default_factory=list)
+
+
+class ExternalConsultantResponse(BaseModel):
+    advice: str
+    suggestedStructure: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class PromptVersions(BaseModel):
+    deidPrompt: str = "deid_prompt:v3-local-llm-semantic-abstraction"
+    checkerPrompt: str = "checker_prompt:v3-local-llm-plus-deterministic-gate"
+    repairPrompt: str = "repair_prompt:v2-local-llm-repair-plus-safety"
+
+
+class WeaveMetadata(BaseModel):
+    traceName: str = "closedai-private-consult-run"
+    project: str = "closedai"
+    status: str = "offline-compatible"
+    evalScores: dict[str, float] = Field(default_factory=dict)
+    promptComparison: list[dict[str, float | str]] = Field(default_factory=list)
+
+
+class RunRequest(BaseModel):
+    rawPrompt: str
+    mode: ConsultMode = "general"
+
+
+class RunResponse(BaseModel):
+    rawPrompt: str
+    detectedEntities: list[SensitiveEntity] = Field(default_factory=list)
+    initialSanitizedPrompt: str
+    checkerResult: CheckerResult
+    repairedSanitizedPrompt: str | None = None
+    finalCheckerResult: CheckerResult
+    utilityResult: UtilityResult
+    externalCallAllowed: bool
+    externalConsultantResponse: ExternalConsultantResponse | None = None
+    finalAnswer: str
+    weaveTraceUrl: str | None = None
+    promptVersions: PromptVersions = Field(default_factory=PromptVersions)
+    weaveMetadata: WeaveMetadata = Field(default_factory=WeaveMetadata)

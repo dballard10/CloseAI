@@ -1,10 +1,13 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Bot,
+  CheckCircle2,
   Menu,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   SendHorizontal,
   ShieldCheck,
   Trash2,
@@ -38,15 +41,63 @@ type BackendHealth = {
 };
 
 type QuerySuccess = {
-  reidentified_response: string;
+  model_response?: string;
+  reidentified_response?: string;
 };
 
 type QueryFailure = {
+  ok?: false;
   error?: {
     provider?: string;
     message?: string;
     setup_hint?: string;
   };
+  checker_result?: CheckerResult;
+  utility_result?: UtilityResult;
+  classified_prompt?: string;
+};
+
+type Mode = "hr" | "legal" | "healthcare" | "education" | "general";
+type Risk = "low" | "medium" | "high";
+
+type SensitiveEntity = {
+  text: string;
+  type: string;
+  risk: Risk;
+  replacementHint?: string | null;
+};
+
+type CheckerResult = {
+  passed: boolean;
+  riskLevel: Risk;
+  leakageTypes: string[];
+  leakedItems: string[];
+  explanation?: string | null;
+  recommendedFix?: string | null;
+};
+
+type UtilityResult = {
+  utilityScore: number;
+  preservedConcepts: string[];
+  missingUsefulContext: string[];
+};
+
+type ClassificationDraft = {
+  session_id: string;
+  mode: Mode;
+  classified_prompt: string;
+  detected_entities: SensitiveEntity[];
+  checker_result: CheckerResult;
+  utility_result: UtilityResult;
+  external_call_allowed: boolean;
+  repaired?: boolean;
+  model_status?: string;
+};
+
+type PendingApproval = ClassificationDraft & {
+  chatId: string;
+  feedback: string;
+  error?: string | null;
 };
 
 const STORAGE_KEY = "closeai:harness:chats:v1";
@@ -207,6 +258,15 @@ function providerLabel(provider: string) {
   return provider;
 }
 
+function inferMode(content: string): Mode {
+  const text = content.toLowerCase();
+  if (/\b(hr|manager|employee|pip|performance improvement|medical leave)\b/.test(text)) return "hr";
+  if (/\b(landlord|tenant|lease|deposit|lawsuit|settlement|eviction)\b/.test(text)) return "legal";
+  if (/\b(patient|doctor|clinician|prescribed|symptoms|medication)\b/.test(text)) return "healthcare";
+  if (/\b(student|professor|course|assignment|academic integrity|cheating)\b/.test(text)) return "education";
+  return "general";
+}
+
 function makeSetupMessage(message?: string, setupHint?: string) {
   return [
     "CloseAI de-identified your prompt locally, but the model provider is not ready yet.",
@@ -232,10 +292,13 @@ function App() {
   const [activeChatId, setActiveChatId] = useState(() => loadActiveChatId(initialChats));
   const [draft, setDraft] = useState("");
   const [isResponding, setIsResponding] = useState(false);
+  const [isRevisingDraft, setIsRevisingDraft] = useState(false);
+  const [isApprovingDraft, setIsApprovingDraft] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
   const [isBackendReachable, setIsBackendReachable] = useState<boolean | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -303,6 +366,7 @@ function App() {
     setChats((current) => [chat, ...current]);
     setActiveChatId(chat.id);
     setDraft("");
+    setPendingApproval(null);
     setIsSidebarOpen(false);
   }
 
@@ -320,6 +384,9 @@ function App() {
       if (chatId === activeChatId) {
         setActiveChatId(nextChats[0].id);
       }
+      if (pendingApproval?.chatId === chatId) {
+        setPendingApproval(null);
+      }
 
       return nextChats;
     });
@@ -329,24 +396,135 @@ function App() {
     setChats((current) => current.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
   }
 
-  async function requestAssistantResponse(content: string) {
+  async function requestClassification(content: string): Promise<ClassificationDraft | string> {
     try {
-      const response = await fetch("/api/query", {
+      const response = await fetch("/api/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: content }),
+        body: JSON.stringify({ text: content, mode: inferMode(content) }),
       });
-      const body = await readJson<QuerySuccess & QueryFailure>(response);
+      const body = await readJson<ClassificationDraft & QueryFailure>(response);
 
       if (!response.ok) {
         return makeSetupMessage(body.error?.message, body.error?.setup_hint);
       }
 
       setIsBackendReachable(true);
-      return body.reidentified_response || "The model returned an empty response.";
+      return body;
     } catch {
       setIsBackendReachable(false);
       return makeBackendUnavailableMessage();
+    }
+  }
+
+  async function reviseClassification() {
+    if (!pendingApproval || isRevisingDraft) return;
+    const feedback = pendingApproval.feedback.trim();
+    if (!feedback) return;
+
+    setIsRevisingDraft(true);
+    try {
+      const response = await fetch("/api/revise-classification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: pendingApproval.session_id, feedback }),
+      });
+      const body = await readJson<ClassificationDraft & QueryFailure>(response);
+
+      if (!response.ok) {
+        setPendingApproval((current) =>
+          current
+            ? {
+                ...current,
+                error: body.error?.message ?? "The local agent could not revise the classified prompt.",
+              }
+            : current,
+        );
+        return;
+      }
+
+      setIsBackendReachable(true);
+      setPendingApproval((current) =>
+        current
+          ? {
+              ...body,
+              chatId: current.chatId,
+              feedback: "",
+              error: null,
+            }
+          : current,
+      );
+    } catch {
+      setIsBackendReachable(false);
+      setPendingApproval((current) =>
+        current
+          ? {
+              ...current,
+              error: makeBackendUnavailableMessage(),
+            }
+          : current,
+      );
+    } finally {
+      setIsRevisingDraft(false);
+    }
+  }
+
+  async function approveClassification() {
+    if (!pendingApproval || isApprovingDraft || !activeChat) return;
+    const chatId = pendingApproval.chatId;
+
+    setIsApprovingDraft(true);
+    setIsResponding(true);
+    try {
+      const response = await fetch("/api/approve-and-query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: pendingApproval.session_id,
+          approved_prompt: pendingApproval.classified_prompt,
+        }),
+      });
+      const body = await readJson<QuerySuccess & QueryFailure>(response);
+
+      if (!response.ok) {
+        setPendingApproval((current) =>
+          current
+            ? {
+                ...current,
+                checker_result: body.checker_result ?? current.checker_result,
+                utility_result: body.utility_result ?? current.utility_result,
+                classified_prompt: body.classified_prompt ?? current.classified_prompt,
+                error: body.error?.message ?? "The approved prompt could not be sent.",
+              }
+            : current,
+        );
+        return;
+      }
+
+      const assistantMessage = createMessage(
+        "assistant",
+        body.model_response || body.reidentified_response || "The model returned an empty response.",
+      );
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        updatedAt: nowIso(),
+        messages: [...chat.messages, assistantMessage],
+      }));
+      setPendingApproval(null);
+      setIsBackendReachable(true);
+    } catch {
+      setIsBackendReachable(false);
+      setPendingApproval((current) =>
+        current
+          ? {
+              ...current,
+              error: makeBackendUnavailableMessage(),
+            }
+          : current,
+      );
+    } finally {
+      setIsApprovingDraft(false);
+      setIsResponding(false);
     }
   }
 
@@ -354,7 +532,7 @@ function App() {
     event?.preventDefault();
 
     const content = draft.trim();
-    if (!content || isResponding || !activeChat) return;
+    if (!content || isResponding || !activeChat || pendingApproval?.chatId === activeChat.id) return;
 
     const chatId = activeChat.id;
     const userMessage = createMessage("user", content);
@@ -373,12 +551,24 @@ function App() {
       };
     });
 
-    const assistantMessage = createMessage("assistant", await requestAssistantResponse(content));
-    updateChat(chatId, (chat) => ({
-      ...chat,
-      updatedAt: nowIso(),
-      messages: [...chat.messages, assistantMessage],
-    }));
+    const classification = await requestClassification(content);
+    if (typeof classification === "string") {
+      const assistantMessage = createMessage("assistant", classification);
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        updatedAt: nowIso(),
+        messages: [...chat.messages, assistantMessage],
+      }));
+      setIsResponding(false);
+      return;
+    }
+
+    setPendingApproval({
+      ...classification,
+      chatId,
+      feedback: "",
+      error: null,
+    });
     setIsResponding(false);
   }
 
@@ -566,11 +756,36 @@ function App() {
                     {activeChat.messages.map((message) => (
                       <MessageBubble key={message.id} message={message} />
                     ))}
+                    {pendingApproval?.chatId === activeChat.id ? (
+                      <ApprovalPanel
+                        draft={pendingApproval}
+                        isApproving={isApprovingDraft}
+                        isRevising={isRevisingDraft}
+                        onApprove={approveClassification}
+                        onFeedbackChange={(feedback) =>
+                          setPendingApproval((current) => (current ? { ...current, feedback } : current))
+                        }
+                        onRevise={reviseClassification}
+                      />
+                    ) : null}
                     {isResponding ? <PendingBubble /> : null}
                     <div ref={messageEndRef} />
                   </div>
                 ) : (
-                  <div ref={messageEndRef} className="min-h-[1px]" />
+                  <div ref={messageEndRef} className="min-h-[1px]">
+                    {pendingApproval?.chatId === activeChat?.id ? (
+                      <ApprovalPanel
+                        draft={pendingApproval}
+                        isApproving={isApprovingDraft}
+                        isRevising={isRevisingDraft}
+                        onApprove={approveClassification}
+                        onFeedbackChange={(feedback) =>
+                          setPendingApproval((current) => (current ? { ...current, feedback } : current))
+                        }
+                        onRevise={reviseClassification}
+                      />
+                    ) : null}
+                  </div>
                 )}
               </div>
             </div>
@@ -585,18 +800,26 @@ function App() {
                     id="message"
                     ref={composerRef}
                     className="min-h-[54px] w-full resize-none overflow-hidden bg-transparent px-3 py-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
-                    placeholder="Message CloseAI Harness..."
+                    placeholder={
+                      pendingApproval?.chatId === activeChat?.id
+                        ? "Approve or revise the classified prompt first..."
+                        : "Message CloseAI Harness..."
+                    }
                     value={draft}
                     onChange={(event) => setDraft(event.target.value)}
                     onKeyDown={handleComposerKeyDown}
-                    disabled={isResponding}
+                    disabled={isResponding || pendingApproval?.chatId === activeChat?.id}
                   />
                   <div className="flex items-center justify-end px-1 pb-1">
                     <button
                       className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-cyan-200 text-slate-950 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
                       type="submit"
                       aria-label="Send message"
-                      disabled={draft.trim().length === 0 || isResponding}
+                      disabled={
+                        draft.trim().length === 0 ||
+                        isResponding ||
+                        pendingApproval?.chatId === activeChat?.id
+                      }
                     >
                       <SendHorizontal size={17} aria-hidden="true" />
                     </button>
@@ -639,6 +862,124 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           <Icon size={17} aria-hidden="true" />
         </div>
       ) : null}
+    </article>
+  );
+}
+
+function ApprovalPanel({
+  draft,
+  isApproving,
+  isRevising,
+  onApprove,
+  onFeedbackChange,
+  onRevise,
+}: {
+  draft: PendingApproval;
+  isApproving: boolean;
+  isRevising: boolean;
+  onApprove: () => void;
+  onFeedbackChange: (feedback: string) => void;
+  onRevise: () => void;
+}) {
+  const checkerTone = draft.checker_result.passed
+    ? "border-emerald-300/25 bg-emerald-300/[0.08] text-emerald-100"
+    : "border-amber-300/25 bg-amber-300/[0.08] text-amber-100";
+  const utility = Math.round(draft.utility_result.utilityScore * 100);
+
+  return (
+    <article className="flex gap-3">
+      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-cyan-300/20 bg-cyan-300/10 text-cyan-100">
+        <ShieldCheck size={17} aria-hidden="true" />
+      </div>
+      <div className="w-full max-w-[min(100%,42rem)] rounded-xl border border-white/10 bg-[#101720] p-4 shadow-2xl shadow-black/20">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Review classified prompt</h2>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">
+              The larger model will only receive this version after approval.
+            </p>
+          </div>
+          <div className={`rounded-lg border px-2.5 py-1 text-xs ${checkerTone}`}>
+            {draft.checker_result.passed ? "Checker passed" : "Checker needs review"}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-sm leading-6 text-zinc-100">
+          <pre className="whitespace-pre-wrap break-words font-sans">{draft.classified_prompt}</pre>
+        </div>
+
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2">
+            <div className="text-xs uppercase tracking-[0.14em] text-zinc-500">Utility</div>
+            <div className="mt-1 text-sm font-medium text-zinc-100">{utility}% preserved</div>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2">
+            <div className="text-xs uppercase tracking-[0.14em] text-zinc-500">Detected</div>
+            <div className="mt-1 text-sm font-medium text-zinc-100">
+              {draft.detected_entities.length} sensitive item{draft.detected_entities.length === 1 ? "" : "s"}
+            </div>
+          </div>
+        </div>
+
+        {draft.checker_result.explanation ? (
+          <p className="mt-3 text-sm leading-6 text-zinc-400">{draft.checker_result.explanation}</p>
+        ) : null}
+
+        {draft.checker_result.leakedItems.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {draft.checker_result.leakedItems.map((item) => (
+              <span
+                className="rounded-md border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-xs text-amber-100"
+                key={item}
+              >
+                {item}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {draft.error ? (
+          <div className="mt-3 flex gap-2 rounded-lg border border-amber-300/25 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{draft.error}</span>
+          </div>
+        ) : null}
+
+        <div className="mt-4">
+          <label className="sr-only" htmlFor="classification-feedback">
+            Requested changes
+          </label>
+          <textarea
+            id="classification-feedback"
+            className="min-h-[86px] w-full resize-y rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-cyan-300/35"
+            placeholder="Tell the local agent what to change before approval..."
+            value={draft.feedback}
+            onChange={(event) => onFeedbackChange(event.target.value)}
+            disabled={isApproving || isRevising}
+          />
+        </div>
+
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-4 text-sm font-medium text-zinc-100 transition hover:border-cyan-300/40 hover:bg-cyan-300/10 disabled:cursor-not-allowed disabled:text-zinc-500"
+            type="button"
+            onClick={onRevise}
+            disabled={draft.feedback.trim().length === 0 || isApproving || isRevising}
+          >
+            <RefreshCw className={`h-4 w-4 ${isRevising ? "animate-spin" : ""}`} aria-hidden="true" />
+            {isRevising ? "Revising" : "Revise"}
+          </button>
+          <button
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan-200 px-4 text-sm font-semibold text-slate-950 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
+            type="button"
+            onClick={onApprove}
+            disabled={isApproving || isRevising || !draft.checker_result.passed}
+          >
+            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+            {isApproving ? "Sending" : "Approve and send"}
+          </button>
+        </div>
+      </div>
     </article>
   );
 }

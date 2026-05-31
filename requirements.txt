@@ -19,3 +19,6 @@ faker>=24.0
 # --- web demo ---
 fastapi>=0.110
 uvicorn[standard]>=0.29
+
+# --- tests ---
+pytest>=8.2

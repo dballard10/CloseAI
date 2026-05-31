@@ -1,0 +1,62 @@
+[
+  {
+    "mode": "hr",
+    "raw": "Sarah Klein at Acme Robotics in Boston requested medical leave after a panic disorder diagnosis. Her manager Alex put her on a PIP two weeks later.",
+    "expected_removed": ["Sarah Klein", "Acme Robotics", "Boston", "Alex", "panic disorder"],
+    "expected_preserved": ["employee", "medical leave", "health diagnosis", "performance warning", "manager"]
+  },
+  {
+    "mode": "legal",
+    "raw": "My landlord Mark Benson at 45 Winter Street in Cambridge says he will keep my security deposit because of damage from March 7.",
+    "expected_removed": ["Mark Benson", "45 Winter Street", "Cambridge", "March 7"],
+    "expected_preserved": ["landlord", "security deposit", "property damage", "dispute"]
+  },
+  {
+    "mode": "healthcare",
+    "raw": "John Smith lives at 14 Beacon Street and was prescribed sertraline by Dr. Rosen after panic attacks began in April.",
+    "expected_removed": ["John Smith", "14 Beacon Street", "Dr. Rosen", "April"],
+    "expected_preserved": ["patient", "medication", "clinician", "symptoms", "recent onset"]
+  },
+  {
+    "mode": "education",
+    "raw": "Maya Patel, a Northeastern student in CS 3500, says Professor Lee accused her of cheating on Project 4.",
+    "expected_removed": ["Maya Patel", "Northeastern", "CS 3500", "Professor Lee", "Project 4"],
+    "expected_preserved": ["student", "course", "academic integrity accusation", "assignment"]
+  },
+  {
+    "mode": "hr",
+    "raw": "Daniel Ortiz told HR that his manager Priya at Northstar Labs denied leave after his cancer treatment schedule changed.",
+    "expected_removed": ["Daniel Ortiz", "Priya", "Northstar Labs", "cancer"],
+    "expected_preserved": ["employee", "medical leave", "health diagnosis", "manager"]
+  },
+  {
+    "mode": "legal",
+    "raw": "A contractor named Elena Ruiz says Apex Systems has not paid invoice 1042 after work at the Austin office.",
+    "expected_removed": ["Elena Ruiz", "Apex Systems", "Austin", "1042"],
+    "expected_preserved": ["contractor", "payment dispute", "invoice", "work"]
+  },
+  {
+    "mode": "healthcare",
+    "raw": "Patient Liam Chen emailed nurse Maria about lithium side effects after a dose change on May 12.",
+    "expected_removed": ["Liam Chen", "Maria", "lithium", "May 12"],
+    "expected_preserved": ["patient", "medication", "clinician", "side effects"]
+  },
+  {
+    "mode": "education",
+    "raw": "Avery Johnson from Lincoln School says Mr. Patel accused them of plagiarism in English 201.",
+    "expected_removed": ["Avery Johnson", "Lincoln School", "Mr. Patel", "English 201"],
+    "expected_preserved": ["student", "course", "academic integrity accusation"]
+  },
+  {
+    "mode": "general",
+    "raw": "Email me at taylor@example.com about the confidential Atlas launch plan in Seattle next Tuesday.",
+    "expected_removed": ["taylor@example.com", "Atlas", "Seattle", "next Tuesday"],
+    "expected_preserved": ["private context", "sensitive details", "requested assistance"]
+  },
+  {
+    "mode": "hr",
+    "raw": "Nina Brooks at Orion Company reported retaliation concerns after requesting accommodations for depression.",
+    "expected_removed": ["Nina Brooks", "Orion Company", "depression"],
+    "expected_preserved": ["employee", "health diagnosis", "workplace context"]
+  }
+]

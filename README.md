@@ -128,9 +128,20 @@ uvicorn app.server:app --reload --port 8000
 # open http://localhost:8000
 ```
 
-The UI shows the original prompt with color-coded highlights, the masked prompt
-that actually leaves the machine, the raw (masked) model response, and the
-re-identified answer.
+The React chat uses a two-step approval flow. The first local agent drafts a
+classified prompt, the user can approve it or ask for changes, and only the
+approved classified prompt is sent to the configured model provider.
+
+Staged API:
+
+```http
+POST /api/classify
+POST /api/revise-classification
+POST /api/approve-and-query
+```
+
+The legacy `/api/query` endpoint still performs a direct de-identify -> model
+call -> re-identify round-trip for tests and CLI-style demos.
 
 ### Local LLM detector (Ollama)
 

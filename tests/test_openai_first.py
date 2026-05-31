@@ -108,6 +108,8 @@ def _client(monkeypatch) -> TestClient:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     server = importlib.import_module("app.server")
     server._pipeline.llm_detector.enabled = False
+    server._consult_pipeline.use_llm = False
+    server._approval_sessions.clear()
     return TestClient(server.app)
 
 
@@ -137,3 +139,52 @@ def test_query_provider_override_echo_still_works(monkeypatch):
     assert "Jane Doe" not in body["masked_prompt"]
     assert "jane@example.com" not in body["masked_prompt"]
     assert "123-45-6789" not in body["masked_prompt"]
+
+
+def test_classify_returns_reviewable_prompt_without_model_call(monkeypatch):
+    client = _client(monkeypatch)
+
+    resp = client.post(
+        "/api/classify",
+        json={
+            "text": "Sarah Klein at Acme Robotics in Boston requested medical leave after a panic disorder diagnosis.",
+            "mode": "hr",
+        },
+    )
+    body = resp.json()
+
+    assert resp.status_code == 200
+    assert body["session_id"]
+    assert "classified_prompt" in body
+    assert "Sarah Klein" not in body["classified_prompt"]
+    assert "checker_result" in body
+    assert "utility_result" in body
+
+
+def test_approve_and_query_sends_only_classified_prompt(monkeypatch):
+    client = _client(monkeypatch)
+
+    classify_resp = client.post(
+        "/api/classify",
+        json={
+            "text": "My landlord Mark Benson at 45 Winter Street in Cambridge is keeping my security deposit.",
+            "mode": "legal",
+        },
+    )
+    classified = classify_resp.json()
+
+    approve_resp = client.post(
+        "/api/approve-and-query",
+        json={
+            "session_id": classified["session_id"],
+            "provider": "echo",
+        },
+    )
+    body = approve_resp.json()
+
+    assert approve_resp.status_code == 200
+    assert "echo provider" in body["model_response"]
+    assert "Mark Benson" not in body["classified_prompt"]
+    assert "45 Winter Street" not in body["classified_prompt"]
+    assert "Mark Benson" not in body["model_response"]
+    assert "45 Winter Street" not in body["model_response"]
