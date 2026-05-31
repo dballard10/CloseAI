@@ -6,3 +6,9 @@ __pycache__/
 wandb/
 *.egg-info/
 .pytest_cache/
+node_modules/
+dist/
+.vite/
+.pnpm-store/
+.pnpm-state/
+pnpm-debug.log*

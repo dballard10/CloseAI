@@ -77,6 +77,13 @@ process. Surrogates come from `Faker` when installed, with a built-in fallback.
 ## Quickstart
 
 ```bash
+just setup
+just dev
+```
+
+Or run the setup manually:
+
+```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m spacy download en_core_web_lg     # for the Presidio agent

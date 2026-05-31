@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #080b10;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+textarea::selection,
+div::selection,
+p::selection,
+h1::selection,
+h2::selection,
+span::selection {
+  background: rgba(103, 232, 249, 0.28);
+}
