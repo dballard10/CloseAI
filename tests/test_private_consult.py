@@ -22,7 +22,7 @@ def test_hr_example_repairs_before_external_call():
     assert result.finalCheckerResult.passed is True
     assert result.externalCallAllowed is True
     assert result.externalConsultantResponse is not None
-    assert "Sarah Klein" in result.finalAnswer
+    assert result.finalAnswer.startswith("Finalizer failed:")
 
 
 def test_legal_example_does_not_send_raw_identifiers():

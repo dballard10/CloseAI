@@ -280,6 +280,10 @@ def _contains_word(text: str, phrase: str) -> bool:
     return re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE) is not None
 
 
+def _contains_any_word(text: str, phrases: Iterable[str]) -> bool:
+    return any(_contains_word(text, phrase) for phrase in phrases)
+
+
 def _as_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -316,18 +320,11 @@ def _is_generic_safe_term(value: str) -> bool:
 
 
 def _infer_mode(raw_prompt: str, mode: ConsultMode) -> ConsultMode:
-    if mode != "general":
-        return mode
-    lower = raw_prompt.lower()
-    if any(term in lower for term in ("medical leave", "pip", "performance improvement plan", "manager", "hr")):
-        return "hr"
-    if any(term in lower for term in ("landlord", "security deposit", "eviction", "lease")):
-        return "legal"
-    if any(term in lower for term in ("prescribed", "doctor", "dr.", "patient", "panic attacks", "sertraline", "symptoms")):
-        return "healthcare"
-    if any(term in lower for term in ("student", "professor", "cheating", "course", "assignment", "project")):
-        return "education"
-    return "general"
+    # The web app no longer exposes a domain selector. Do not infer hidden modes
+    # with substring heuristics; the LLM stages infer the situation from the
+    # prompt content. Explicit API callers can still pass a mode for tests or
+    # deterministic fallbacks.
+    return mode
 
 
 class PrivateConsultPipeline:
@@ -395,6 +392,20 @@ class PrivateConsultPipeline:
         if self.internal_provider == "ollama":
             return self.local_llm.chat_json(system, user, schema)
         return None
+
+    def _trusted_chat_text(self, system: str, user: str) -> str | None:
+        if self.internal_provider == "wandb":
+            return self.wandb_internal.chat(system, user)
+        if self.internal_provider == "ollama":
+            return self.local_llm.chat(system, user)
+        return None
+
+    def _trusted_llm_error(self) -> str:
+        if self.internal_provider == "wandb":
+            return self.wandb_internal.last_error or "trusted W&B model returned no JSON"
+        if self.internal_provider == "ollama":
+            return self.local_llm.last_error or "local Ollama model returned no JSON"
+        return f"unsupported trusted provider: {self.internal_provider}"
 
     def _use_llm_step(self, step: str) -> bool:
         return self._llm_ready() and ("all" in self.llm_steps or step in self.llm_steps)
@@ -565,9 +576,7 @@ class PrivateConsultPipeline:
             if llm_result:
                 return llm_result
 
-        lower = raw_prompt.lower()
-
-        if mode == "hr" or any(term in lower for term in ("medical leave", "pip", "manager", "hr")):
+        if mode == "hr":
             # v1-style semantic abstraction intentionally keeps some specificity.
             org = next((e.text for e in entities if e.type == "ORGANIZATION"), "a company")
             health = next((e.text for e in entities if e.type == "HEALTH_INFORMATION" and e.text != "medical leave"), "health diagnosis")
@@ -577,33 +586,26 @@ class PrivateConsultPipeline:
                 ["employee", "medical leave", "health diagnosis", "manager", "performance warning"],
             )
 
-        if mode == "legal" or "security deposit" in lower:
+        if mode == "legal":
             return (
                 "A tenant is in a dispute with a landlord about a security deposit after alleged property damage. "
                 "Help structure a careful response.",
                 ["landlord", "security deposit", "property damage", "dispute"],
             )
 
-        if mode == "healthcare" or any(term in lower for term in ("prescribed", "patient", "panic attacks")):
-            med = "SSRI" if "sertraline" in lower else "medication"
+        if mode == "healthcare":
+            med = "medication"
             return (
-                f"A patient had recent symptoms and was prescribed an {med} by a clinician. "
+                f"A patient had recent symptoms and was prescribed {med} by a clinician. "
                 "Help prepare neutral questions and next steps.",
                 ["patient", med, "clinician", "symptoms", "recent onset"],
             )
 
-        if mode == "education" or any(term in lower for term in ("professor", "student", "cheating")):
+        if mode == "education":
             return (
                 "A student in a course was accused of an academic integrity issue on an assignment. "
                 "Help draft a careful, factual response.",
                 ["student", "course", "academic integrity accusation", "assignment"],
-            )
-
-        if any(term in lower for term in ("save", "saving", "invest", "investing", "salary", "income", "200k", "401k", "retirement")):
-            return (
-                "A high-income employee is seeking practical guidance on saving, investing, retirement planning, "
-                "tax-aware account prioritization, and future financial goals.",
-                ["financial planning", "income context", "saving", "investing", "future goals"],
             )
 
         prompt = raw_prompt
@@ -651,6 +653,7 @@ class PrivateConsultPipeline:
         system = (
             "You are the trusted local de-identification agent in ClosedAI. You can see the raw private "
             "question, but an external model cannot. Produce a semantic abstraction that preserves the user's "
+            "task and infer the domain from the raw question; the mode value is only an optional hint. Preserve "
             "task and enough non-identifying context for useful advice. Remove or generalize all names, "
             "employers, schools, addresses, emails, phones, exact locations, exact dates, course/project IDs, "
             "rare quasi-identifiers, and overly specific medical/legal/HR/education details. Do not use bracket "
@@ -1205,14 +1208,17 @@ class PrivateConsultPipeline:
         if not external_allowed:
             return (
                 "I could not safely consult the external model because the sanitized abstraction did not pass "
-                "the privacy and utility gate. Inside the trusted boundary, I can still help by drafting from "
-                f"the original private context:\n\n{self._trusted_draft(raw_prompt, mode)}"
+                "the privacy and utility gate. Finalizer was not run."
             )
         if self._use_llm_step("finalize"):
             llm_final = self._llm_finalize(raw_prompt, mode, external)
             if llm_final:
                 return llm_final
-        return self._trusted_draft(raw_prompt, mode, external)
+            return (
+                "Finalizer failed: the trusted finalizer model did not return a valid final answer. "
+                f"Reason: {self._trusted_llm_error()}"
+            )
+        return "Finalizer failed: trusted LLM finalization is disabled."
 
     def _llm_finalize(
         self,
@@ -1233,72 +1239,23 @@ class PrivateConsultPipeline:
             f"External consultant advice JSON:\n{external.model_dump() if external else None}"
         )
         data = self._trusted_chat_json(system, user, FINALIZER_SCHEMA)
-        if not data:
-            return None
-        final = str(data.get("finalAnswer") or "").strip()
-        return final or None
+        if data:
+            final = str(data.get("finalAnswer") or "").strip()
+            if final:
+                return final
 
-    def _trusted_draft(
-        self,
-        raw_prompt: str,
-        mode: ConsultMode,
-        external: ExternalConsultantResponse | None = None,
-    ) -> str:
-        lower = raw_prompt.lower()
-        if mode == "general" and any(term in lower for term in ("save", "saving", "invest", "investing", "salary", "income", "200k", "401k", "retirement")):
-            advice = external.advice if external else "Use a diversified, tax-aware plan and avoid concentrated risk."
-            output_format = external.outputFormat if external and external.outputFormat else "Use a concise numbered plan."
-            finalizer_instructions = (
-                external.finalizerInstructions
-                if external and external.finalizerInstructions
-                else "Use the user's private employer and income context only where it materially changes the financial guidance."
-            )
-            return (
-                "Here is a practical way to think about it:\n\n"
-                f"Format followed: {output_format}\n"
-                f"Local finalizer instructions followed: {finalizer_instructions}\n\n"
-                "1. Build or keep an emergency fund of roughly 3-6 months of core expenses in cash or a high-yield savings account.\n"
-                "2. Max out tax-advantaged accounts available to you, starting with any employer match, then 401(k), IRA/backdoor Roth if applicable, and HSA if eligible.\n"
-                "3. Invest long-term money in a diversified low-cost portfolio rather than trying to pick single winners. Broad stock and bond index funds are usually enough.\n"
-                "4. Keep company-stock exposure limited if your income already depends on the same employer.\n"
-                "5. Define the next 3-5 year goals, such as housing, family needs, career flexibility, or relocation, and keep money for those goals in lower-volatility accounts.\n\n"
-                f"External consultant framing: {advice}\n\n"
-                "This is planning guidance, not personalized financial advice. A fee-only fiduciary planner or CPA can help tune the tax and account-ordering details."
-            )
-        if mode == "legal" or "security deposit" in raw_prompt.lower():
-            return (
-                "Hi,\n\nI am writing to clarify the security deposit issue and the stated basis for withholding it. "
-                "Please send the itemized explanation, any supporting documentation, and the timeline you are relying on. "
-                "I want to resolve this based on the lease, the condition of the property, and written records rather than assumptions.\n\n"
-                "Thank you."
-            )
-        if mode == "healthcare" or "prescribed" in raw_prompt.lower():
-            return (
-                "Hi Dr. Rosen,\n\nI would like to understand the recent symptoms, the reason sertraline was recommended, "
-                "what side effects or warning signs I should watch for, and when we should follow up. "
-                "Please let me know what information would help you assess next steps.\n\nThank you."
-            )
-        if mode == "education" or "cheating" in raw_prompt.lower():
-            return (
-                "Professor Lee,\n\nI understand there is a concern about Project 4 in CS 3500. "
-                "Could you please share the specific evidence and the course policy section at issue? "
-                "I would like to respond carefully and provide any relevant context in a meeting or written reply.\n\nThank you,\nMaya Patel"
-            )
-
-        advice = external.advice if external else "Keep the tone neutral and factual."
-        output_format = external.outputFormat if external and external.outputFormat else "Format as a concise email."
-        finalizer_instructions = external.finalizerInstructions if external and external.finalizerInstructions else "Use private context only as needed."
-        return (
-            "Hi HR,\n\n"
-            "I would like to clarify the timeline around Sarah Klein's PIP and her earlier request for medical leave. "
-            "My understanding is that Sarah Klein requested leave after a panic disorder diagnosis, and two weeks later "
-            "Alex placed her on a PIP. I am not trying to assume anyone's intent, but I would like the company to review "
-            "the documentation, the stated basis for the PIP, and whether the timing raises any process concerns.\n\n"
-            f"To keep this careful: {advice}\n\n"
-            f"Format followed: {output_format}\n"
-            f"Local finalizer instructions followed: {finalizer_instructions}\n\n"
-            "Could you please confirm the next step, what records should be provided, and who will review the matter?"
+        text_system = (
+            "You are the trusted local finalizer inside the privacy boundary. You may use the raw private "
+            "prompt because you are local. Use the external consultant's generic advice as input, but write "
+            "the final user-facing answer yourself. Follow the consultant's outputFormat and "
+            "finalizerInstructions exactly unless they conflict with safety or the user's request. Be careful, "
+            "neutral, and practical. Return only the final answer text. Do not return JSON. Do not wrap the "
+            "answer in a markdown code fence."
         )
+        text = self._trusted_chat_text(text_system, user)
+        if not text:
+            return None
+        return _clean_finalizer_text(text)
 
     def _event(self, stage: str, patch: dict[str, Any]) -> dict[str, Any]:
         return {"stage": stage, "patch": patch}
@@ -1930,3 +1887,11 @@ class PrivateConsultPipeline:
 
 def should_call_external(checker_result: CheckerResult, utility_result: UtilityResult) -> bool:
     return checker_result.passed and utility_result.utilityScore >= 0.6
+
+
+def _clean_finalizer_text(text: str) -> str | None:
+    cleaned = text.strip()
+    fenced = re.fullmatch(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```", cleaned, flags=re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    return cleaned or None

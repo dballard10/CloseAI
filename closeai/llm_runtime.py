@@ -32,6 +32,7 @@ class LocalLLM:
         self.model = model or os.getenv("CLOSEDAI_LOCAL_MODEL") or os.getenv("OLLAMA_MODEL", "llama3.2")
         self.timeout = timeout or int(os.getenv("CLOSEDAI_LOCAL_TIMEOUT", "180"))
         self._resolved_model: str | None = None
+        self.last_error: str | None = None
 
     def available(self) -> bool:
         return self.resolve_model() is not None
@@ -71,11 +72,15 @@ class LocalLLM:
         raw = self.chat(system, user, schema=schema or JSON_OBJECT_SCHEMA)
         if raw is None:
             return None
-        return parse_json_object(raw)
+        parsed = parse_json_object(raw)
+        if parsed is None:
+            self.last_error = _non_json_error(raw)
+        return parsed
 
     def chat(self, system: str, user: str, schema: dict[str, Any] | None = None) -> str | None:
         model = self.resolve_model()
         if not model:
+            self.last_error = f"No Ollama model available for {self.model}"
             return None
         payload: dict[str, Any] = {
             "model": model,
@@ -92,8 +97,10 @@ class LocalLLM:
             response = requests.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)
             response.raise_for_status()
             content = response.json().get("message", {}).get("content", "")
+            self.last_error = None
             return strip_thinking(content)
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return None
 
 
@@ -111,6 +118,29 @@ class WANDbInferenceClient:
 
     def available(self) -> bool:
         return bool(self.api_key)
+
+    def chat(self, system: str, user: str) -> str | None:
+        if not self.api_key:
+            self.last_error = "WANDB_API_KEY is not set"
+            return None
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0,
+            )
+            content = strip_thinking(response.choices[0].message.content or "")
+            self.last_error = None
+            return content or None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
 
     def chat_json(self, system: str, user: str, schema: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not self.api_key:
@@ -130,8 +160,12 @@ class WANDbInferenceClient:
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or ""
-            self.last_error = None
-            return parse_json_object(content)
+            parsed = parse_json_object(content)
+            if parsed is None:
+                self.last_error = _non_json_error(content)
+            else:
+                self.last_error = None
+            return parsed
         except Exception as exc:
             self.last_error = str(exc)
             return None
@@ -168,8 +202,12 @@ class OpenAIExternalClient:
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or ""
-            self.last_error = None
-            return parse_json_object(content)
+            parsed = parse_json_object(content)
+            if parsed is None:
+                self.last_error = _non_json_error(content)
+            else:
+                self.last_error = None
+            return parsed
         except Exception as exc:
             self.last_error = str(exc)
             return None
@@ -195,3 +233,11 @@ def parse_json_object(raw: str) -> dict[str, Any] | None:
 
 def strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
+def _non_json_error(raw: str) -> str:
+    preview = strip_thinking(raw)
+    preview = re.sub(r"\s+", " ", preview).strip()
+    if len(preview) > 180:
+        preview = f"{preview[:177]}..."
+    return f"model returned non-JSON content: {preview or '<empty>'}"
