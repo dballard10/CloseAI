@@ -1,0 +1,10 @@
+{"text": "Hi, I'm Jane Doe and my email is jane.doe@acme.com.", "sensitive": ["Jane Doe", "jane.doe@acme.com"]}
+{"text": "Call me at 555-123-4567 or reach my SSN 123-45-6789.", "sensitive": ["555-123-4567", "123-45-6789"]}
+{"text": "My manager at the Cambridge office is 37 years old.", "sensitive": ["Cambridge", "37"]}
+{"text": "We pay with card 4111 1111 1111 1111 every month.", "sensitive": ["4111 1111 1111 1111"]}
+{"text": "The only female VP at our 12-person startup in Palo Alto.", "sensitive": ["female VP", "Palo Alto"]}
+{"text": "Patient John Smith was admitted last Tuesday to Boston General.", "sensitive": ["John Smith", "last Tuesday", "Boston General"]}
+{"text": "Ship it to 221B Baker Street, London.", "sensitive": ["221B Baker Street", "London"]}
+{"text": "Our server IP is 192.168.10.42 and the admin is bob@corp.io.", "sensitive": ["192.168.10.42", "bob@corp.io"]}
+{"text": "I'm a 29 year old engineer who just moved to Seattle.", "sensitive": ["29", "Seattle"]}
+{"text": "The recipe needs two cups of flour and a pinch of salt.", "sensitive": []}

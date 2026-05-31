@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CloseAI — de-identifying proxy for closed LLMs</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --panel: #131a26;
+      --panel-2: #1a2433;
+      --text: #e6edf3;
+      --muted: #8b98a9;
+      --accent: #6ea8fe;
+      --mask: #f0a05a;
+      --generalize: #8bd17c;
+      --drop: #f06a6a;
+      --keep: #7a8699;
+      --border: #233044;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5;
+    }
+    header {
+      padding: 22px 28px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 14px;
+    }
+    header h1 { font-size: 20px; margin: 0; letter-spacing: -0.3px; }
+    header .tag { color: var(--muted); font-size: 13px; }
+    .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 80px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+    .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 0 0 12px; }
+    textarea {
+      width: 100%; min-height: 150px; resize: vertical; background: var(--panel-2);
+      color: var(--text); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px; font-size: 14px; font-family: inherit;
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    button {
+      background: var(--accent); color: #06101f; border: none; padding: 10px 16px;
+      border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 14px;
+    }
+    button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+    button:disabled { opacity: 0.5; cursor: default; }
+    select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+    pre, .out { white-space: pre-wrap; word-wrap: break-word; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 14px; min-height: 40px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+    .pill.mask { background: rgba(240,160,90,0.18); color: var(--mask); }
+    .pill.generalize { background: rgba(139,209,124,0.18); color: var(--generalize); }
+    .pill.drop { background: rgba(240,106,106,0.18); color: var(--drop); }
+    .pill.keep { background: rgba(122,134,153,0.18); color: var(--keep); }
+    mark { border-radius: 4px; padding: 1px 3px; color: #06101f; }
+    mark.mask { background: var(--mask); }
+    mark.generalize { background: var(--generalize); }
+    mark.drop { background: var(--drop); text-decoration: line-through; }
+    mark.keep { background: var(--keep); }
+    .ent { display: flex; gap: 8px; align-items: baseline; padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+    .ent:last-child { border-bottom: none; }
+    .ent .type { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+    .ent .reason { color: var(--muted); font-style: italic; }
+    .arrow { color: var(--muted); }
+    .stats { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .stats b { color: var(--text); }
+    .muted { color: var(--muted); font-size: 13px; }
+    .examples button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); font-weight: 500; font-size: 12px; padding: 6px 10px; }
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color: transparent; border-radius:50%; animation: spin .7s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🔒 CloseAI</h1>
+    <span class="tag">de-identify locally → query the closed model → re-identify the answer</span>
+    <span style="flex:1"></span>
+    <span class="badge" id="health">checking…</span>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Your prompt (contains sensitive info)</h2>
+      <textarea id="input" placeholder="Type a message with names, emails, locations, ages…">Hi, I'm Jane Doe (jane.doe@acme.com, 555-123-4567). My SSN is 123-45-6789. My manager at the Cambridge office is 37 and we're flying to San Francisco next Tuesday.</textarea>
+      <div class="row examples">
+        <span class="muted">examples:</span>
+        <button data-ex="Hi, I'm Jane Doe (jane.doe@acme.com, 555-123-4567). My SSN is 123-45-6789. My manager at the Cambridge office is 37 and we're flying to San Francisco next Tuesday.">PII-heavy</button>
+        <button data-ex="The only female VP at our 12-person startup in Palo Alto wants to discuss a raise. I'm 29.">contextual</button>
+        <button data-ex="Patient John Smith, admitted last Tuesday to Boston General, card 4111 1111 1111 1111.">medical</button>
+      </div>
+      <div class="row">
+        <button id="btn-deid">De-identify only</button>
+        <button id="btn-query" class="secondary">De-identify &amp; query model</button>
+        <select id="provider" title="closed model provider">
+          <option value="">(server default)</option>
+          <option value="echo">echo (offline)</option>
+          <option value="ollama">ollama (local)</option>
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+          <option value="wandb">wandb inference</option>
+        </select>
+        <span id="status" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:18px;">
+      <div class="card">
+        <h2>Detected entities &amp; decisions</h2>
+        <div id="entities"><span class="muted">Run a de-identification to see detected entities.</span></div>
+        <div class="stats" id="stats"></div>
+      </div>
+      <div class="card">
+        <h2>Masked prompt (what leaves your machine)</h2>
+        <div class="out" id="masked"></div>
+        <h2 style="margin-top:16px;">Highlighted original</h2>
+        <div class="out" id="highlighted"></div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:18px;">
+      <div class="card">
+        <h2>Raw model response (still masked)</h2>
+        <div class="out" id="raw"></div>
+      </div>
+      <div class="card">
+        <h2>Re-identified answer (shown to you)</h2>
+        <div class="out" id="final"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    async function health() {
+      try {
+        const r = await fetch("/api/health");
+        const j = await r.json();
+        $("health").textContent = `presidio:${j.presidio_mode} · llm-detector:${j.llm_detector_enabled ? "on" : "off"} · ${j.provider}/${j.model}`;
+      } catch { $("health").textContent = "server offline"; }
+    }
+
+    function renderEntities(decisions) {
+      if (!decisions.length) { $("entities").innerHTML = '<span class="muted">No sensitive entities detected.</span>'; return; }
+      $("entities").innerHTML = decisions.map(d => {
+        const a = d.action;
+        const reason = d.span.reason ? `<div class="reason">↳ ${esc(d.span.reason)}</div>` : "";
+        return `<div class="ent">
+          <span class="pill ${a}">${a}</span>
+          <div style="flex:1">
+            <div><b>${esc(d.span.text)}</b> <span class="arrow">→</span> ${esc(d.replacement) || "<em>(removed)</em>"}</div>
+            <span class="type">${d.span.entity_type} · ${d.span.source} · ${d.span.score.toFixed(2)}</span>
+            ${reason}
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderHighlight(text, decisions) {
+      const sorted = [...decisions].sort((a, b) => a.span.start - b.span.start);
+      let out = "", cursor = 0;
+      for (const d of sorted) {
+        const s = d.span;
+        if (s.start < cursor) continue;
+        out += esc(text.slice(cursor, s.start));
+        out += `<mark class="${d.action}" title="${d.span.entity_type} (${d.action})">${esc(text.slice(s.start, s.end))}</mark>`;
+        cursor = s.end;
+      }
+      out += esc(text.slice(cursor));
+      $("highlighted").innerHTML = out;
+    }
+
+    function renderStats(r) {
+      $("stats").innerHTML = `
+        <span>detected <b>${r.n_detected ?? r.decisions.length}</b></span>
+        <span>masked <b>${r.n_masked ?? "-"}</b></span>
+        <span>generalized <b>${r.n_generalized ?? "-"}</b></span>
+        <span>dropped <b>${r.n_dropped ?? "-"}</b></span>
+        <span>kept <b>${r.n_kept ?? "-"}</b></span>`;
+    }
+
+    function busy(on, msg) {
+      $("btn-deid").disabled = on; $("btn-query").disabled = on;
+      $("status").innerHTML = on ? `<span class="spinner"></span> ${msg}` : "";
+    }
+
+    async function deidentify() {
+      busy(true, "de-identifying locally…");
+      try {
+        const r = await fetch("/api/deidentify", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: $("input").value })
+        });
+        const j = await r.json();
+        renderEntities(j.decisions);
+        renderHighlight(j.original_text, j.decisions);
+        renderStats(j);
+        $("masked").textContent = j.masked_text;
+        $("raw").textContent = ""; $("final").textContent = "";
+      } catch (e) { $("status").textContent = "error: " + e; }
+      busy(false);
+    }
+
+    async function query() {
+      busy(true, "de-identifying → querying model → re-identifying…");
+      try {
+        const r = await fetch("/api/query", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: $("input").value, provider: $("provider").value || null })
+        });
+        const j = await r.json();
+        renderEntities(j.mask_result.decisions);
+        renderHighlight(j.mask_result.original_text, j.mask_result.decisions);
+        renderStats(j);
+        $("masked").textContent = j.masked_prompt;
+        $("raw").textContent = j.raw_model_response;
+        $("final").textContent = j.reidentified_response;
+      } catch (e) { $("status").textContent = "error: " + e; }
+      busy(false);
+    }
+
+    $("btn-deid").onclick = deidentify;
+    $("btn-query").onclick = query;
+    document.querySelectorAll(".examples button").forEach(b => {
+      b.onclick = () => { $("input").value = b.dataset.ex; };
+    });
+    health();
+  </script>
+</body>
+</html>
