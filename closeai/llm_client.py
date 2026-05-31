@@ -47,10 +47,11 @@ class ClosedModelClient:
         from openai import OpenAI
 
         if wandb:
+            # NB: use a dedicated var, NOT WANDB_BASE_URL — that one is reserved by
+            # wandb/weave to reach the W&B *platform* and would break tracing.
             client = OpenAI(
-                base_url=os.getenv("WANDB_BASE_URL", "https://api.inference.wandb.ai/v1"),
+                base_url=os.getenv("WANDB_INFERENCE_BASE_URL", "https://api.inference.wandb.ai/v1"),
                 api_key=os.getenv("WANDB_API_KEY"),
-                project=os.getenv("WANDB_PROJECT"),  # type: ignore[call-arg]
             )
         else:
             client = OpenAI()
