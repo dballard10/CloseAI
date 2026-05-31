@@ -82,24 +82,31 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_lg     # for the Presidio agent
 
 cp .env.example .env                          # then edit as needed
+export OPENAI_API_KEY=...                     # default closed-model provider
 wandb login                                   # for Weave tracing
 ```
 
-Runs **with zero API keys**: the closed model is a local Ollama model. Without
-Presidio it falls back to regex, and without Ollama it skips the LLM detector.
+The default demo path uses OpenAI (`CLOSEAI_PROVIDER=openai`). For an offline
+round-trip, set `CLOSEAI_PROVIDER=echo`; without Presidio it falls back to
+regex, and without Ollama it skips the LLM detector.
+Weave traces redact raw prompts, entity maps, and re-identified answers by
+default; set `CLOSEAI_TRACE_RAW=1` only for fully synthetic demos.
 
 ### CLI
 
 ```bash
-# Full round-trip (de-identify -> local model -> re-identify)
+# Full round-trip (de-identify -> model -> re-identify)
 python cli.py "My name is Jane Doe. Write a one-line greeting that addresses me by name."
 # -> closed model sees a fake name; you see "Hello Jane Doe, ..."
+
+# Offline fallback (no API key)
+python cli.py --provider echo "Hi, I'm Jane Doe (jane@acme.com)."
 
 # Just show what would be masked
 python cli.py --deidentify-only "My manager at the Cambridge office is 37."
 
-# Pin a specific local model
-python cli.py --model llama2:latest "Hi, I'm Jane Doe (jane@acme.com)."
+# Pin a specific model
+python cli.py --provider ollama --model llama3.2 "Hi, I'm Jane Doe (jane@acme.com)."
 ```
 
 ### Web demo
@@ -162,7 +169,7 @@ closeai/
   schemas.py          # Span, EntityDecision, MaskResult, PipelineResult
   config.py           # Settings + the per-entity POLICY map (the tuning knob)
   observability.py    # Weave @op wrapper with graceful no-op fallback
-  llm_client.py       # closed model client (local Ollama)
+  llm_client.py       # closed model client (OpenAI/Anthropic/W&B/Ollama/echo)
   pipeline.py         # orchestrator: the top-level traced flow
   agents/
     presidio_detector.py   # agent 1  (+ regex fallback)

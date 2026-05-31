@@ -67,7 +67,12 @@
     .stats { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; color: var(--muted); font-size: 13px; }
     .stats b { color: var(--text); }
     .muted { color: var(--muted); font-size: 13px; }
+    .error { color: var(--drop); font-size: 13px; }
     .examples button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); font-weight: 500; font-size: 12px; padding: 6px 10px; }
+    input {
+      background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px; min-width: 150px;
+    }
     .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color: transparent; border-radius:50%; animation: spin .7s linear infinite; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
@@ -92,7 +97,15 @@
       </div>
       <div class="row">
         <button id="btn-deid">De-identify only</button>
-        <button id="btn-query" class="secondary">De-identify &amp; query local model</button>
+        <button id="btn-query" class="secondary">De-identify &amp; query model</button>
+        <select id="provider" title="closed model provider">
+          <option value="openai" selected>openai</option>
+          <option value="echo">echo (offline)</option>
+          <option value="ollama">ollama (local)</option>
+          <option value="anthropic">anthropic</option>
+          <option value="wandb">wandb inference</option>
+        </select>
+        <input id="model" title="model override" placeholder="gpt-4o-mini" />
         <span id="status" class="muted"></span>
       </div>
     </div>
@@ -131,7 +144,8 @@
       try {
         const r = await fetch("/api/health");
         const j = await r.json();
-        $("health").textContent = `presidio:${j.presidio_mode} · llm-detector:${j.llm_detector_enabled ? "on" : "off"} · closed-model:${j.closed_model}`;
+        $("health").textContent = `presidio:${j.presidio_mode} · llm-detector:${j.llm_detector_enabled ? "on" : "off"} · ${j.provider}/${j.model}${j.provider_configured ? "" : " · key needed"}`;
+        $("model").placeholder = j.model || "gpt-4o-mini";
       } catch { $("health").textContent = "server offline"; }
     }
 
@@ -166,17 +180,28 @@
     }
 
     function renderStats(r) {
+      const decisions = r.decisions || r.mask_result?.decisions || [];
+      const count = (action) => decisions.filter(d => d.action === action).length;
       $("stats").innerHTML = `
-        <span>detected <b>${r.n_detected ?? r.decisions.length}</b></span>
-        <span>surrogated <b>${r.n_surrogated ?? "-"}</b></span>
-        <span>described <b>${r.n_described ?? "-"}</b></span>
-        <span>dropped <b>${r.n_dropped ?? "-"}</b></span>
-        <span>kept <b>${r.n_kept ?? "-"}</b></span>`;
+        <span>detected <b>${r.n_detected ?? decisions.length}</b></span>
+        <span>surrogated <b>${r.n_surrogated ?? count("surrogate")}</b></span>
+        <span>described <b>${r.n_described ?? count("describe")}</b></span>
+        <span>dropped <b>${r.n_dropped ?? count("drop")}</b></span>
+        <span>kept <b>${r.n_kept ?? count("keep")}</b></span>`;
     }
 
     function busy(on, msg) {
       $("btn-deid").disabled = on; $("btn-query").disabled = on;
-      $("status").innerHTML = on ? `<span class="spinner"></span> ${msg}` : "";
+      if (on) $("status").innerHTML = `<span class="spinner"></span> ${msg}`;
+    }
+
+    function done() {
+      $("btn-deid").disabled = false; $("btn-query").disabled = false;
+    }
+
+    function setStatus(message, isError = false) {
+      $("status").className = isError ? "error" : "muted";
+      $("status").textContent = message || "";
     }
 
     async function deidentify() {
@@ -192,8 +217,9 @@
         renderStats(j);
         $("masked").textContent = j.masked_text;
         $("raw").textContent = ""; $("final").textContent = "";
-      } catch (e) { $("status").textContent = "error: " + e; }
-      busy(false);
+        setStatus("");
+      } catch (e) { setStatus("error: " + e, true); }
+      done();
     }
 
     async function query() {
@@ -201,17 +227,35 @@
       try {
         const r = await fetch("/api/query", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: $("input").value })
+          body: JSON.stringify({
+            text: $("input").value,
+            provider: $("provider").value || null,
+            model: $("model").value || null
+          })
         });
         const j = await r.json();
+        if (!r.ok) {
+          if (j.mask_result) {
+            renderEntities(j.mask_result.decisions);
+            renderHighlight(j.mask_result.original_text, j.mask_result.decisions);
+            renderStats(j.mask_result);
+            $("masked").textContent = j.masked_prompt || j.mask_result.masked_text;
+          }
+          $("raw").textContent = "";
+          $("final").textContent = "";
+          setStatus(j.error?.message || "model request failed", true);
+          done();
+          return;
+        }
         renderEntities(j.mask_result.decisions);
         renderHighlight(j.mask_result.original_text, j.mask_result.decisions);
         renderStats(j);
         $("masked").textContent = j.masked_prompt;
         $("raw").textContent = j.raw_model_response;
         $("final").textContent = j.reidentified_response;
-      } catch (e) { $("status").textContent = "error: " + e; }
-      busy(false);
+        setStatus("");
+      } catch (e) { setStatus("error: " + e, true); }
+      done();
     }
 
     $("btn-deid").onclick = deidentify;

@@ -37,6 +37,55 @@ except Exception:  # pragma: no cover
 
 _INITIALIZED = False
 
+_SENSITIVE_TRACE_KEYS = {
+    "text",
+    "original_text",
+    "original_prompt",
+    "raw_model_response",
+    "reidentified_response",
+    "entity_map",
+}
+
+_REDACTED = "[REDACTED_LOCAL_PII]"
+
+
+def _weave_disabled() -> bool:
+    return os.getenv("WEAVE_DISABLED", "").lower() in ("1", "true", "yes")
+
+
+def _trace_raw() -> bool:
+    return os.getenv("CLOSEAI_TRACE_RAW", "").lower() in ("1", "true", "yes")
+
+
+def sanitize_for_trace(value: Any) -> Any:
+    """Strip locally sensitive fields before Weave persists trace data."""
+    if _trace_raw():
+        return value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            if str(key) in _SENSITIVE_TRACE_KEYS:
+                sanitized[key] = _REDACTED
+            else:
+                sanitized[key] = sanitize_for_trace(item)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_for_trace(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_for_trace(item) for item in value)
+    return value
+
+
+def _privacy_op_kwargs(op_kwargs: dict[str, Any]) -> dict[str, Any]:
+    if _trace_raw():
+        return op_kwargs
+    with_privacy = dict(op_kwargs)
+    with_privacy.setdefault("postprocess_inputs", sanitize_for_trace)
+    with_privacy.setdefault("postprocess_output", sanitize_for_trace)
+    return with_privacy
+
 
 def init_weave(project: str | None = None) -> bool:
     """Initialise Weave tracing. Returns True if Weave is actually active.
@@ -46,7 +95,7 @@ def init_weave(project: str | None = None) -> bool:
     """
 
     global _INITIALIZED
-    if not _WEAVE_AVAILABLE:
+    if _weave_disabled() or not _WEAVE_AVAILABLE:
         return False
     if _INITIALIZED:
         return True
@@ -70,14 +119,14 @@ def op(*op_args: Any, **op_kwargs: Any) -> Callable:
     # Bare decorator usage: @op
     if len(op_args) == 1 and callable(op_args[0]) and not op_kwargs:
         func = op_args[0]
-        if _WEAVE_AVAILABLE:
-            return weave.op()(func)
+        if _WEAVE_AVAILABLE and not _weave_disabled():
+            return weave.op(**_privacy_op_kwargs({}))(func)
         return func
 
     # Parametrised usage: @op(name="...")
     def decorator(func: Callable) -> Callable:
-        if _WEAVE_AVAILABLE:
-            return weave.op(*op_args, **op_kwargs)(func)
+        if _WEAVE_AVAILABLE and not _weave_disabled():
+            return weave.op(*op_args, **_privacy_op_kwargs(op_kwargs))(func)
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:

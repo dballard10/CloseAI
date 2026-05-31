@@ -53,6 +53,9 @@ FALLBACK_ACTION = Action.SURROGATE
 @dataclass
 class Settings:
     weave_project: str = field(default_factory=lambda: os.getenv("WEAVE_PROJECT", "closeai"))
+    trace_raw: bool = field(
+        default_factory=lambda: os.getenv("CLOSEAI_TRACE_RAW", "0") in ("1", "true", "True")
+    )
 
     # Local LLM detector (Ollama).
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
@@ -64,8 +67,9 @@ class Settings:
     # spaCy model used by Presidio.
     spacy_model: str = field(default_factory=lambda: os.getenv("SPACY_MODEL", "en_core_web_lg"))
 
-    # Closed-source model — a local Ollama model (auto-resolves if not installed).
-    model: str = field(default_factory=lambda: os.getenv("CLOSEAI_MODEL", "llama3.2"))
+    # Closed-source model — OpenAI by default, with Ollama/echo available offline.
+    provider: str = field(default_factory=lambda: os.getenv("CLOSEAI_PROVIDER", "openai"))
+    model: str = field(default_factory=lambda: os.getenv("CLOSEAI_MODEL", "gpt-4o-mini"))
 
     # Detection threshold for Presidio (0-1). Lower => more recall, more FPs.
     presidio_threshold: float = field(

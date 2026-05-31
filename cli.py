@@ -34,7 +34,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CloseAI de-identifying LLM proxy")
     parser.add_argument("prompt", nargs="?", help="prompt text (or pipe via stdin)")
     parser.add_argument("--deidentify-only", action="store_true", help="skip the model call")
-    parser.add_argument("--model", help="override CLOSEAI_MODEL (the local Ollama model)")
+    parser.add_argument("--provider", help="override CLOSEAI_PROVIDER (openai|anthropic|wandb|ollama|echo)")
+    parser.add_argument("--model", help="override CLOSEAI_MODEL")
     parser.add_argument("--no-trace", action="store_true", help="disable Weave tracing")
     args = parser.parse_args()
 
@@ -43,6 +44,8 @@ def main() -> None:
         parser.error("provide a prompt argument or pipe text via stdin")
 
     settings = Settings()
+    if args.provider:
+        settings.provider = args.provider
     if args.model:
         settings.model = args.model
 

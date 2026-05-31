@@ -61,7 +61,20 @@ class CloseAIPipeline:
         self.masker = Masker()
         self.reidentifier = Reidentifier()
         self.model = ClosedModelClient(
+            self.settings.provider,
             self.settings.model,
+            ollama_host=self.settings.ollama_host,
+        )
+
+    def model_client(
+        self, provider: str | None = None, model: str | None = None
+    ) -> ClosedModelClient:
+        """Create a request-local model client when provider/model are overridden."""
+        if provider is None and model is None:
+            return self.model
+        return ClosedModelClient(
+            provider or self.settings.provider,
+            model or self.settings.model,
             ollama_host=self.settings.ollama_host,
         )
 
@@ -80,12 +93,24 @@ class CloseAIPipeline:
         return self.masker.mask(text, decisions)
 
     @op
-    def deidentify_and_query(self, text: str, system: str | None = None) -> PipelineResult:
+    def deidentify_and_query(
+        self,
+        text: str,
+        system: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> PipelineResult:
         """Full round-trip: de-identify, send to the closed model, re-identify."""
         mask_result = self.deidentify(text)
-        raw_response = self.model.complete(mask_result.masked_text, system=system)
-        final = self.reidentifier.reidentify(raw_response, mask_result.entity_map)
+        client = self.model_client(provider=provider, model=model)
+        raw_response = client.complete(mask_result.masked_text, system=system)
+        return self.build_result(text, mask_result, raw_response)
 
+    def build_result(
+        self, text: str, mask_result: MaskResult, raw_response: str
+    ) -> PipelineResult:
+        """Assemble the user-facing result after the closed model responds."""
+        final = self.reidentifier.reidentify(raw_response, mask_result.entity_map)
         actions = [d.action for d in mask_result.decisions]
         return PipelineResult(
             original_prompt=text,

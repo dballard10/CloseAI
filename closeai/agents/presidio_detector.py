@@ -13,12 +13,17 @@ the LLM detector (agent 2) is there to catch.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..observability import op
 from ..schemas import Span
 
-# Minimal, deliberately greedy regexes for the fallback path.
+# Minimal, deliberately greedy regexes used as both fallback and safety net.
 _FALLBACK_PATTERNS: dict[str, re.Pattern] = {
+    "PERSON": re.compile(
+        r"\b(?:I(?:'m| am)|my name is|Patient|Ask|Contact|Email|Call)\s+"
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b"
+    ),
     "EMAIL_ADDRESS": re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
     "PHONE_NUMBER": re.compile(r"(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]?\d{4}"),
     "US_SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
@@ -37,9 +42,15 @@ class PresidioDetector:
         self._analyzer = None
         self._mode = "regex"
         try:
+            import spacy
             from presidio_analyzer import AnalyzerEngine
             from presidio_analyzer.nlp_engine import NlpEngineProvider
 
+            if not spacy.util.is_package(spacy_model) and not Path(spacy_model).exists():
+                raise RuntimeError(
+                    f"spaCy model '{spacy_model}' is not installed; "
+                    "run `python -m spacy download en_core_web_lg` to enable NER."
+                )
             provider = NlpEngineProvider(
                 nlp_configuration={
                     "nlp_engine_name": "spacy",
@@ -61,7 +72,7 @@ class PresidioDetector:
     @op
     def detect(self, text: str) -> list[Span]:
         if self._mode == "presidio":
-            return self._detect_presidio(text)
+            return self._detect_presidio(text) + self._detect_regex(text)
         return self._detect_regex(text)
 
     def _detect_presidio(self, text: str) -> list[Span]:
@@ -86,12 +97,13 @@ class PresidioDetector:
         spans: list[Span] = []
         for entity_type, pattern in _FALLBACK_PATTERNS.items():
             for m in pattern.finditer(text):
+                start, end = (m.start(1), m.end(1)) if m.lastindex else (m.start(), m.end())
                 spans.append(
                     Span(
-                        start=m.start(),
-                        end=m.end(),
+                        start=start,
+                        end=end,
                         entity_type=entity_type,
-                        text=m.group(0),
+                        text=text[start:end],
                         score=0.9,
                         source="presidio",
                     )
