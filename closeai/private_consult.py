@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .llm_runtime import LocalLLM, OpenAIExternalClient, WANDbInferenceClient
-from .observability import init_weave, op
+from .observability import create_run_tracker, init_weave, op
 from .schemas import (
     CheckerResult,
     ConsultMode,
@@ -1265,12 +1265,22 @@ class PrivateConsultPipeline:
     def _event(self, stage: str, patch: dict[str, Any]) -> dict[str, Any]:
         return {"stage": stage, "patch": patch}
 
-    def _base_trace_patch(self, eval_scores: dict[str, float] | None = None) -> dict[str, Any]:
+    def _base_trace_patch(
+        self,
+        eval_scores: dict[str, float] | None = None,
+        tracker: Any | None = None,
+    ) -> dict[str, Any]:
+        trace_url = getattr(tracker, "ui_url", None)
         return {
+            "weaveTraceUrl": trace_url,
             "promptVersions": PROMPT_VERSIONS.model_dump(mode="json"),
             "weaveMetadata": WeaveMetadata(
                 project=self.weave_project,
                 status=self.model_status,
+                runId=getattr(tracker, "run_id", None),
+                traceId=getattr(tracker, "trace_id", None),
+                dashboardUrl=trace_url,
+                trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
                 evalScores=eval_scores or {},
                 promptComparison=[
                     {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
@@ -1281,22 +1291,53 @@ class PrivateConsultPipeline:
 
     def run_stream(self, raw_prompt: str, mode: ConsultMode = "general") -> Iterable[dict[str, Any]]:
         mode = _infer_mode(raw_prompt, mode)
+        tracker = create_run_tracker(
+            project=self.weave_project,
+            raw_prompt=raw_prompt,
+            mode=mode,
+            model_status=self.model_status,
+            route="stream",
+        )
         yield self._event(
             "started",
             {
                 "rawPrompt": raw_prompt,
                 "detectedEntities": [],
                 "externalCallAllowed": False,
-                **self._base_trace_patch(),
+                **self._base_trace_patch(tracker=tracker),
             },
         )
 
-        if self._use_llm_pipeline():
-            yield from self._run_llm_pipeline_stream(raw_prompt, mode)
+        try:
+            if self._use_llm_pipeline():
+                yield from self._run_llm_pipeline_stream(raw_prompt, mode, tracker)
+                return
+
+            yield from self._run_deterministic_pipeline_stream(raw_prompt, mode, tracker)
+        except Exception as exc:
+            tracker.stage("error", output={"error": str(exc)})
+            tracker.finish(exception=exc)
+            yield {"stage": "error", "error": str(exc)}
             return
+
+    def _run_deterministic_pipeline_stream(
+        self,
+        raw_prompt: str,
+        mode: ConsultMode,
+        tracker: Any,
+    ) -> Iterable[dict[str, Any]]:
 
         entities = self.detect_entities(raw_prompt, mode)
         initial_sanitized, initial_concepts = self.deidentify(raw_prompt, entities, mode)
+        tracker.stage(
+            "deidentified",
+            inputs={"mode": mode},
+            output={
+                "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                "initial_sanitized_prompt": initial_sanitized,
+                "preserved_concepts": initial_concepts,
+            },
+        )
         yield self._event(
             "deidentified",
             {
@@ -1309,6 +1350,11 @@ class PrivateConsultPipeline:
         final_sanitized = initial_sanitized
         final_check = first_check
         repaired = None
+        tracker.stage(
+            "checked",
+            inputs={"sanitized_prompt": initial_sanitized},
+            output={"checker_result": first_check.model_dump(mode="json")},
+        )
         yield self._event(
             "checked",
             {
@@ -1321,6 +1367,14 @@ class PrivateConsultPipeline:
             repaired = self.repair(initial_sanitized, first_check, entities)
             final_sanitized = repaired
             final_check = self.check(repaired, entities)
+            tracker.stage(
+                "repaired",
+                inputs={"checker_result": first_check.model_dump(mode="json")},
+                output={
+                    "repaired_sanitized_prompt": repaired,
+                    "final_checker_result": final_check.model_dump(mode="json"),
+                },
+            )
             yield self._event(
                 "repaired",
                 {
@@ -1330,6 +1384,11 @@ class PrivateConsultPipeline:
             )
 
         utility = self.evaluate_utility(final_sanitized, mode, initial_concepts)
+        tracker.stage(
+            "utility_evaluated",
+            inputs={"sanitized_prompt": final_sanitized},
+            output=utility.model_dump(mode="json"),
+        )
         yield self._event("utility_evaluated", {"utilityResult": utility.model_dump(mode="json")})
 
         repair_success = not first_check.passed and final_check.passed
@@ -1355,6 +1414,15 @@ class PrivateConsultPipeline:
                 final_check = improved_check
                 utility = improved_utility
                 repaired = final_sanitized if final_sanitized != initial_sanitized else repaired
+                tracker.stage(
+                    "utility_retry",
+                    inputs={"previous_utility": utility.utilityScore},
+                    output={
+                        "repaired_sanitized_prompt": repaired,
+                        "final_checker_result": final_check.model_dump(mode="json"),
+                        "utility_result": utility.model_dump(mode="json"),
+                    },
+                )
                 yield self._event(
                     "utility_retry",
                     {
@@ -1365,13 +1433,32 @@ class PrivateConsultPipeline:
                 )
 
         external_allowed = final_check.passed and utility.utilityScore >= self.utility_threshold
+        tracker.stage(
+            "privacy_gate",
+            output={
+                "external_call_allowed": external_allowed,
+                "checker_passed": final_check.passed,
+                "utility_score": utility.utilityScore,
+                "utility_threshold": self.utility_threshold,
+            },
+        )
         yield self._event("privacy_gate", {"externalCallAllowed": external_allowed})
 
         external = self.external_consult(final_sanitized, mode) if external_allowed else None
         if external is not None:
+            tracker.stage(
+                "external_consulted",
+                inputs={"external_prompt": final_sanitized, "provider": self.external_provider},
+                output=external.model_dump(mode="json"),
+            )
             yield self._event("external_consulted", {"externalConsultantResponse": external.model_dump(mode="json")})
 
         final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
+        tracker.stage(
+            "finalized",
+            inputs={"external_call_allowed": external_allowed},
+            output={"final_answer": final_answer},
+        )
         eval_scores = {
             "direct_leakage": 1.0 if final_check.passed else 0.0,
             "semantic_utility": utility.utilityScore,
@@ -1390,11 +1477,15 @@ class PrivateConsultPipeline:
             externalCallAllowed=external_allowed,
             externalConsultantResponse=external,
             finalAnswer=final_answer,
-            weaveTraceUrl=os.getenv("WEAVE_TRACE_URL"),
+            weaveTraceUrl=getattr(tracker, "ui_url", None) or os.getenv("WEAVE_TRACE_URL"),
             promptVersions=PROMPT_VERSIONS,
             weaveMetadata=WeaveMetadata(
                 project=self.weave_project,
                 status=self.model_status,
+                runId=getattr(tracker, "run_id", None),
+                traceId=getattr(tracker, "trace_id", None),
+                dashboardUrl=getattr(tracker, "ui_url", None),
+                trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
                 evalScores=eval_scores,
                 promptComparison=[
                     {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
@@ -1402,14 +1493,33 @@ class PrivateConsultPipeline:
                 ],
             ),
         )
+        tracker.finish(
+            output={
+                "external_call_allowed": external_allowed,
+                "eval_scores": eval_scores,
+                "weave_trace_url": final_response.weaveTraceUrl,
+            }
+        )
         yield self._event("completed", final_response.model_dump(mode="json"))
 
-    def _run_llm_pipeline_stream(self, raw_prompt: str, mode: ConsultMode) -> Iterable[dict[str, Any]]:
+    def _run_llm_pipeline_stream(self, raw_prompt: str, mode: ConsultMode, tracker: Any) -> Iterable[dict[str, Any]]:
         first_deid = self.llm_deidentify_once(raw_prompt, mode)
         if first_deid is None:
-            yield self._event("completed", self.run(raw_prompt, mode).model_dump(mode="json"))
+            fallback = self.run(raw_prompt, mode)
+            tracker.stage("fallback", output=fallback.model_dump(mode="json"))
+            tracker.finish(output={"fallback": True, "weave_trace_url": getattr(tracker, "ui_url", None)})
+            yield self._event("completed", fallback.model_dump(mode="json"))
             return
         initial_sanitized, entities, concepts = first_deid
+        tracker.stage(
+            "deidentified",
+            inputs={"mode": mode},
+            output={
+                "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                "initial_sanitized_prompt": initial_sanitized,
+                "preserved_concepts": concepts,
+            },
+        )
         yield self._event(
             "deidentified",
             {
@@ -1420,13 +1530,24 @@ class PrivateConsultPipeline:
 
         first_check_result = self.llm_check_once(raw_prompt, initial_sanitized, entities, concepts, mode)
         if first_check_result is None:
-            yield self._event("completed", self.run(raw_prompt, mode).model_dump(mode="json"))
+            fallback = self.run(raw_prompt, mode)
+            tracker.stage("fallback", output=fallback.model_dump(mode="json"))
+            tracker.finish(output={"fallback": True, "weave_trace_url": getattr(tracker, "ui_url", None)})
+            yield self._event("completed", fallback.model_dump(mode="json"))
             return
         first_check, utility = first_check_result
         repaired = None
         final_sanitized = initial_sanitized
         final_check = first_check
         final_utility = utility
+        tracker.stage(
+            "checked",
+            inputs={"sanitized_prompt": initial_sanitized},
+            output={
+                "checker_result": first_check.model_dump(mode="json"),
+                "utility_result": final_utility.model_dump(mode="json"),
+            },
+        )
         yield self._event(
             "checked",
             {
@@ -1444,6 +1565,16 @@ class PrivateConsultPipeline:
                 if second_check is not None:
                     final_sanitized = repaired
                     final_check, final_utility = second_check
+                    tracker.stage(
+                        "repaired",
+                        inputs={"checker_result": first_check.model_dump(mode="json")},
+                        output={
+                            "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                            "repaired_sanitized_prompt": repaired,
+                            "final_checker_result": final_check.model_dump(mode="json"),
+                            "utility_result": final_utility.model_dump(mode="json"),
+                        },
+                    )
                     yield self._event(
                         "repaired",
                         {
@@ -1478,6 +1609,16 @@ class PrivateConsultPipeline:
                 final_sanitized = improved_sanitized
                 final_check = improved_checker
                 final_utility = improved_utility
+                tracker.stage(
+                    "utility_retry",
+                    inputs={"previous_checker_result": final_check.model_dump(mode="json")},
+                    output={
+                        "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                        "repaired_sanitized_prompt": repaired,
+                        "final_checker_result": final_check.model_dump(mode="json"),
+                        "utility_result": final_utility.model_dump(mode="json"),
+                    },
+                )
                 yield self._event(
                     "utility_retry",
                     {
@@ -1489,13 +1630,32 @@ class PrivateConsultPipeline:
                 )
 
         external_allowed = final_check.passed and final_utility.utilityScore >= self.utility_threshold
+        tracker.stage(
+            "privacy_gate",
+            output={
+                "external_call_allowed": external_allowed,
+                "checker_passed": final_check.passed,
+                "utility_score": final_utility.utilityScore,
+                "utility_threshold": self.utility_threshold,
+            },
+        )
         yield self._event("privacy_gate", {"externalCallAllowed": external_allowed})
 
         external = self.external_consult(final_sanitized, mode) if external_allowed else None
         if external is not None:
+            tracker.stage(
+                "external_consulted",
+                inputs={"external_prompt": final_sanitized, "provider": self.external_provider},
+                output=external.model_dump(mode="json"),
+            )
             yield self._event("external_consulted", {"externalConsultantResponse": external.model_dump(mode="json")})
 
         final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
+        tracker.stage(
+            "finalized",
+            inputs={"external_call_allowed": external_allowed},
+            output={"final_answer": final_answer},
+        )
         repair_attempted = repaired is not None
         eval_scores = {
             "direct_leakage": 1.0 if final_check.passed else 0.0,
@@ -1515,11 +1675,15 @@ class PrivateConsultPipeline:
             externalCallAllowed=external_allowed,
             externalConsultantResponse=external,
             finalAnswer=final_answer,
-            weaveTraceUrl=os.getenv("WEAVE_TRACE_URL"),
+            weaveTraceUrl=getattr(tracker, "ui_url", None) or os.getenv("WEAVE_TRACE_URL"),
             promptVersions=PROMPT_VERSIONS,
             weaveMetadata=WeaveMetadata(
                 project=self.weave_project,
                 status=self.model_status,
+                runId=getattr(tracker, "run_id", None),
+                traceId=getattr(tracker, "trace_id", None),
+                dashboardUrl=getattr(tracker, "ui_url", None),
+                trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
                 evalScores=eval_scores,
                 promptComparison=[
                     {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
@@ -1527,14 +1691,35 @@ class PrivateConsultPipeline:
                 ],
             ),
         )
+        tracker.finish(
+            output={
+                "external_call_allowed": external_allowed,
+                "eval_scores": eval_scores,
+                "weave_trace_url": final_response.weaveTraceUrl,
+            }
+        )
         yield self._event("completed", final_response.model_dump(mode="json"))
 
     @op
     def run(self, raw_prompt: str, mode: ConsultMode = "general") -> RunResponse:
         mode = _infer_mode(raw_prompt, mode)
+        tracker = create_run_tracker(
+            project=self.weave_project,
+            raw_prompt=raw_prompt,
+            mode=mode,
+            model_status=self.model_status,
+            route="sync",
+        )
         if self._use_llm_pipeline():
             llm_result = self._run_llm_pipeline(raw_prompt, mode)
             if llm_result is not None:
+                llm_result.weaveTraceUrl = getattr(tracker, "ui_url", None) or llm_result.weaveTraceUrl
+                llm_result.weaveMetadata.runId = getattr(tracker, "run_id", None)
+                llm_result.weaveMetadata.traceId = getattr(tracker, "trace_id", None)
+                llm_result.weaveMetadata.dashboardUrl = getattr(tracker, "ui_url", None)
+                llm_result.weaveMetadata.trackingStatus = "live" if getattr(tracker, "enabled", False) else "not_configured"
+                tracker.stage("completed", output=llm_result.model_dump(mode="json"))
+                tracker.finish(output={"weave_trace_url": llm_result.weaveTraceUrl})
                 return llm_result
 
         entities = self.detect_entities(raw_prompt, mode)
@@ -1586,8 +1771,8 @@ class PrivateConsultPipeline:
             "repair_success": 1.0 if repair_success else 0.0,
             "utility_retry_success": 1.0 if final_check.passed and utility.utilityScore >= self.utility_threshold else 0.0,
         }
-        trace_url = os.getenv("WEAVE_TRACE_URL")
-        return RunResponse(
+        trace_url = getattr(tracker, "ui_url", None) or os.getenv("WEAVE_TRACE_URL")
+        final_response = RunResponse(
             rawPrompt=raw_prompt,
             detectedEntities=entities,
             initialSanitizedPrompt=initial_sanitized,
@@ -1603,6 +1788,10 @@ class PrivateConsultPipeline:
             weaveMetadata=WeaveMetadata(
                 project=self.weave_project,
                 status=self.model_status,
+                runId=getattr(tracker, "run_id", None),
+                traceId=getattr(tracker, "trace_id", None),
+                dashboardUrl=getattr(tracker, "ui_url", None),
+                trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
                 evalScores=eval_scores,
                 promptComparison=[
                     {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
@@ -1610,6 +1799,9 @@ class PrivateConsultPipeline:
                 ],
             ),
         )
+        tracker.stage("completed", output=final_response.model_dump(mode="json"))
+        tracker.finish(output={"weave_trace_url": final_response.weaveTraceUrl, "eval_scores": eval_scores})
+        return final_response
 
     def _run_llm_pipeline(self, raw_prompt: str, mode: ConsultMode) -> RunResponse | None:
         first_deid = self.llm_deidentify_once(raw_prompt, mode)

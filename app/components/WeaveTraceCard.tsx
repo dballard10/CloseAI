@@ -14,8 +14,25 @@ export function WeaveTraceCard({ result }: { result?: Partial<RunResponse> | nul
           <div className="flex flex-wrap gap-2">
             <Badge tone="default">{metadata?.traceName ?? "closedai-private-consult-run"}</Badge>
             <Badge tone={result.weaveTraceUrl ? "success" : "muted"}>{result.weaveTraceUrl ? "trace linked" : "offline trace stub"}</Badge>
+            <Badge tone={metadata?.trackingStatus === "live" ? "success" : "muted"}>{metadata?.trackingStatus ?? "not configured"}</Badge>
             <Badge tone="muted">{metadata?.status ?? "offline-compatible"}</Badge>
           </div>
+          {result.weaveTraceUrl ? (
+            <a
+              className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium text-primary hover:bg-muted"
+              href={result.weaveTraceUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open Weave trace
+            </a>
+          ) : null}
+          {metadata?.runId || metadata?.traceId ? (
+            <div className="grid gap-x-6 gap-y-3 md:grid-cols-2">
+              {metadata.runId ? <Metric label="Run ID" value={metadata.runId} /> : null}
+              {metadata.traceId ? <Metric label="Trace ID" value={metadata.traceId} /> : null}
+            </div>
+          ) : null}
           {versions ? (
             <div className="grid gap-x-6 gap-y-3 md:grid-cols-3">
               <Metric label="De-id prompt" value={versions.deidPrompt} />

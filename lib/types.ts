@@ -55,6 +55,10 @@ export type RunResponse = {
     traceName: string;
     project: string;
     status: string;
+    runId?: string | null;
+    traceId?: string | null;
+    dashboardUrl?: string | null;
+    trackingStatus?: string;
     evalScores: Record<string, number>;
     promptComparison: Array<Record<string, number | string>>;
   };

@@ -137,6 +137,35 @@ Do not commit real API keys. Use shell exports or a local `.env` file.
 
 ## Evaluation
 
+## Weave Tracking
+
+When `WANDB_API_KEY` is set, ClosedAI creates a live Weave parent call for each
+privacy-gate run. The parent call is named `closedai.privacy_gate_run` and has
+child calls for:
+
+- `deidentified`
+- `checked`
+- `repaired` when needed
+- `utility_evaluated` or `utility_retry`
+- `privacy_gate`
+- `external_consulted`
+- `finalized`
+
+The app returns the parent call URL in `weaveTraceUrl` and shows an
+`Open Weave trace` link in the dashboard.
+
+To view activity:
+
+1. Run the app with `WANDB_API_KEY` and `WEAVE_PROJECT=closeai`.
+2. Submit a prompt in the ClosedAI web UI.
+3. Open the `Open Weave trace` link in the Weave metadata card.
+4. Or go to `https://wandb.ai/<entity>/closeai/weave`, open `Calls`, and filter
+   for `closedai.privacy_gate_run`.
+5. Open a run to inspect inputs, outputs, child stages, timing, model status,
+   checker results, utility scores, privacy-gate decision, and final answer.
+
+Formal Weave eval logging will be added next to the synthetic eval suite.
+
 ClosedAI includes a synthetic evaluation set for HR, legal, healthcare,
 education, and general private-context scenarios.
 

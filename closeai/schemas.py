@@ -125,6 +125,10 @@ class WeaveMetadata(BaseModel):
     traceName: str = "closedai-private-consult-run"
     project: str = "closedai"
     status: str = "offline-compatible"
+    runId: str | None = None
+    traceId: str | None = None
+    dashboardUrl: str | None = None
+    trackingStatus: str = "not_configured"
     evalScores: dict[str, float] = Field(default_factory=dict)
     promptComparison: list[dict[str, float | str]] = Field(default_factory=list)
 

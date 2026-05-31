@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import functools
 import os
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 try:  # pragma: no cover - import guard
@@ -96,3 +98,120 @@ def op(*op_args: Any, **op_kwargs: Any) -> Callable:
 
 def weave_available() -> bool:
     return _WEAVE_AVAILABLE
+
+
+@dataclass
+class WeaveRunTracker:
+    project: str
+    raw_prompt: str
+    mode: str
+    model_status: str
+    route: str
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    client: Any | None = None
+    parent_call: Any | None = None
+    ui_url: str | None = None
+    trace_id: str | None = None
+    enabled: bool = False
+    stage_count: int = 0
+    _finished: bool = False
+
+    def start(self) -> "WeaveRunTracker":
+        if not init_weave(self.project):
+            return self
+        try:
+            from weave.trace.context import weave_client_context  # type: ignore
+
+            self.client = weave_client_context.require_weave_client()
+            self.parent_call = self.client.create_call(
+                "closedai.privacy_gate_run",
+                {
+                    "run_id": self.run_id,
+                    "raw_prompt": self.raw_prompt,
+                    "mode": self.mode,
+                    "route": self.route,
+                },
+                attributes={
+                    "closedai": {
+                        "run_id": self.run_id,
+                        "route": self.route,
+                        "mode": self.mode,
+                        "model_status": self.model_status,
+                        "environment": os.getenv("CLOSEDAI_ENV", "local"),
+                    }
+                },
+                display_name=f"ClosedAI privacy gate {self.run_id[:8]}",
+            )
+            self.ui_url = getattr(self.parent_call, "ui_url", None)
+            self.trace_id = getattr(self.parent_call, "trace_id", None)
+            self.enabled = True
+        except Exception as exc:
+            print(f"[observability] Weave run tracking failed ({exc}); continuing without parent trace.")
+        return self
+
+    def stage(
+        self,
+        name: str,
+        inputs: dict[str, Any] | None = None,
+        output: Any | None = None,
+    ) -> None:
+        if not self.enabled or self.client is None or self.parent_call is None:
+            return
+        try:
+            self.stage_count += 1
+            call = self.client.create_call(
+                f"closedai.stage.{name}",
+                {
+                    "run_id": self.run_id,
+                    "stage": name,
+                    **(inputs or {}),
+                },
+                parent=self.parent_call,
+                attributes={
+                    "closedai": {
+                        "run_id": self.run_id,
+                        "stage": name,
+                        "stage_index": self.stage_count,
+                    }
+                },
+                display_name=f"{self.stage_count:02d}. {name.replace('_', ' ')}",
+            )
+            self.client.finish_call(call, output=output)
+        except Exception as exc:
+            print(f"[observability] Weave stage tracking failed for {name} ({exc}).")
+
+    def finish(self, output: Any | None = None, exception: BaseException | None = None) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        if not self.enabled or self.client is None or self.parent_call is None:
+            return
+        try:
+            self.client.finish_call(
+                self.parent_call,
+                output={
+                    "run_id": self.run_id,
+                    "stage_count": self.stage_count,
+                    **(output if isinstance(output, dict) else {"output": output}),
+                },
+                exception=exception,
+            )
+            self.client.finish(use_progress_bar=False)
+        except Exception as exc:
+            print(f"[observability] Weave finish failed ({exc}).")
+
+
+def create_run_tracker(
+    project: str,
+    raw_prompt: str,
+    mode: str,
+    model_status: str,
+    route: str,
+) -> WeaveRunTracker:
+    return WeaveRunTracker(
+        project=project,
+        raw_prompt=raw_prompt,
+        mode=mode,
+        model_status=model_status,
+        route=route,
+    ).start()
