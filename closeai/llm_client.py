@@ -29,6 +29,7 @@ class ModelProviderError(RuntimeError):
 
 def provider_is_configured(provider: str) -> bool:
     """Return whether the provider has the local credentials it needs."""
+    provider = provider.lower()
     if provider == "openai":
         return bool(os.getenv("OPENAI_API_KEY"))
     if provider == "anthropic":
@@ -67,7 +68,7 @@ class ClosedModelClient:
             if not os.getenv("WANDB_API_KEY"):
                 raise ModelProviderError(
                     "wandb",
-                    "WANDB_API_KEY is required to use W&B Inference.",
+                    "WANDB_API_KEY is required to use W&B Inference. Add it to .env and restart the backend, or set CLOSEAI_PROVIDER=echo for an offline demo.",
                     status_code=400,
                 )
             # NB: use a dedicated var, NOT WANDB_BASE_URL — that one is reserved by
@@ -76,7 +77,7 @@ class ClosedModelClient:
             if not os.getenv("OPENAI_API_KEY"):
                 raise ModelProviderError(
                     "openai",
-                    "OPENAI_API_KEY is required to use OpenAI. Select echo for an offline demo.",
+                    "OPENAI_API_KEY is required to use OpenAI. Add it to .env and restart the backend, or set CLOSEAI_PROVIDER=echo for an offline demo.",
                     status_code=400,
                 )
 
@@ -107,7 +108,7 @@ class ClosedModelClient:
         if not os.getenv("ANTHROPIC_API_KEY"):
             raise ModelProviderError(
                 "anthropic",
-                "ANTHROPIC_API_KEY is required to use Anthropic.",
+                "ANTHROPIC_API_KEY is required to use Anthropic. Add it to .env and restart the backend, or set CLOSEAI_PROVIDER=echo for an offline demo.",
                 status_code=400,
             )
         import anthropic

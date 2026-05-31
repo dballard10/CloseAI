@@ -29,15 +29,28 @@ type ChatSession = {
   messages: ChatMessage[];
 };
 
+type BackendHealth = {
+  status: string;
+  provider: string;
+  model: string;
+  provider_configured: boolean;
+  setup_message?: string | null;
+};
+
+type QuerySuccess = {
+  reidentified_response: string;
+};
+
+type QueryFailure = {
+  error?: {
+    provider?: string;
+    message?: string;
+    setup_hint?: string;
+  };
+};
+
 const STORAGE_KEY = "closeai:harness:chats:v1";
 const ACTIVE_CHAT_KEY = "closeai:harness:active-chat:v1";
-const MOCK_DELAY_MS = 760;
-
-const samplePrompts = [
-  "Draft a concise reply to my manager without exposing my personal details.",
-  "Summarize this sensitive case note and preserve the important action items.",
-  "Help rewrite this customer update after local de-identification.",
-];
 
 function nowIso() {
   return new Date().toISOString();
@@ -167,30 +180,6 @@ function makeTitle(content: string) {
   return firstLine.length > 42 ? `${firstLine.slice(0, 39).trim()}...` : firstLine;
 }
 
-function makeMockResponse(content: string) {
-  const hasSensitiveHint = /\b(email|phone|ssn|address|patient|customer|manager|name|private|sensitive)\b/i.test(
-    content,
-  );
-
-  if (hasSensitiveHint) {
-    return [
-      "Mock response from CloseAI Harness:",
-      "",
-      "I would first treat the sensitive parts of your prompt as locally protected context, send only a de-identified version to the closed model, then restore the useful references on your machine before showing the final answer.",
-      "",
-      "For this MVP, I am only simulating that round trip so you can test chat flow and local history.",
-    ].join("\n");
-  }
-
-  return [
-    "Mock response from CloseAI Harness:",
-    "",
-    "I can help with that. In the full harness, your prompt would be de-identified locally before the model sees it, and the response would be re-identified locally before it comes back into this conversation.",
-    "",
-    "This reply is mocked for the frontend MVP.",
-  ].join("\n");
-}
-
 function formatRelativeTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -203,6 +192,40 @@ function formatRelativeTime(value: string) {
   }).format(date);
 }
 
+async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function providerLabel(provider: string) {
+  if (provider === "openai") return "OpenAI";
+  if (provider === "anthropic") return "Anthropic";
+  if (provider === "wandb") return "W&B Inference";
+  if (provider === "ollama") return "Ollama";
+  if (provider === "echo") return "Echo";
+  return provider;
+}
+
+function makeSetupMessage(message?: string, setupHint?: string) {
+  return [
+    "CloseAI de-identified your prompt locally, but the model provider is not ready yet.",
+    "",
+    message ?? "The backend could not complete the model request.",
+    setupHint ? `\n${setupHint}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function makeBackendUnavailableMessage() {
+  return [
+    "I could not reach the CloseAI backend.",
+    "",
+    "Run `just dev` from the repo root, then try again. For live OpenAI replies, add `OPENAI_API_KEY=...` to `.env`; for an offline smoke test, set `CLOSEAI_PROVIDER=echo`.",
+  ].join("\n");
+}
+
 function App() {
   const initialChats = useMemo(loadChats, []);
   const [chats, setChats] = useState<ChatSession[]>(initialChats);
@@ -210,7 +233,11 @@ function App() {
   const [draft, setDraft] = useState("");
   const [isResponding, setIsResponding] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
+  const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
+  const [isBackendReachable, setIsBackendReachable] = useState<boolean | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) ?? chats[0];
   const sortedChats = useMemo(
@@ -229,6 +256,47 @@ function App() {
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeChat?.messages.length, isResponding]);
+
+  useEffect(() => {
+    resizeComposer();
+  }, [draft]);
+
+  useEffect(() => {
+    window.addEventListener("resize", resizeComposer);
+
+    return () => {
+      window.removeEventListener("resize", resizeComposer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBackendHealth() {
+      try {
+        const response = await fetch("/api/health");
+        if (!response.ok) throw new Error(`health check failed: ${response.status}`);
+        const health = await readJson<BackendHealth>(response);
+        if (!cancelled) {
+          setBackendHealth(health);
+          setIsBackendReachable(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setBackendHealth(null);
+          setIsBackendReachable(false);
+        }
+      }
+    }
+
+    loadBackendHealth();
+    const interval = window.setInterval(loadBackendHealth, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   function createNewChat() {
     const chat = createBlankChat();
@@ -257,21 +325,43 @@ function App() {
     });
   }
 
-  function updateActiveChat(updater: (chat: ChatSession) => ChatSession) {
-    setChats((current) => current.map((chat) => (chat.id === activeChatId ? updater(chat) : chat)));
+  function updateChat(chatId: string, updater: (chat: ChatSession) => ChatSession) {
+    setChats((current) => current.map((chat) => (chat.id === chatId ? updater(chat) : chat)));
   }
 
-  function handleSubmit(event?: FormEvent) {
+  async function requestAssistantResponse(content: string) {
+    try {
+      const response = await fetch("/api/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: content }),
+      });
+      const body = await readJson<QuerySuccess & QueryFailure>(response);
+
+      if (!response.ok) {
+        return makeSetupMessage(body.error?.message, body.error?.setup_hint);
+      }
+
+      setIsBackendReachable(true);
+      return body.reidentified_response || "The model returned an empty response.";
+    } catch {
+      setIsBackendReachable(false);
+      return makeBackendUnavailableMessage();
+    }
+  }
+
+  async function handleSubmit(event?: FormEvent) {
     event?.preventDefault();
 
     const content = draft.trim();
     if (!content || isResponding || !activeChat) return;
 
+    const chatId = activeChat.id;
     const userMessage = createMessage("user", content);
     setDraft("");
     setIsResponding(true);
 
-    updateActiveChat((chat) => {
+    updateChat(chatId, (chat) => {
       const wasUntitled = chat.messages.length === 0 && chat.title === "New chat";
       const timestamp = nowIso();
 
@@ -283,15 +373,13 @@ function App() {
       };
     });
 
-    window.setTimeout(() => {
-      const assistantMessage = createMessage("assistant", makeMockResponse(content));
-      updateActiveChat((chat) => ({
-        ...chat,
-        updatedAt: nowIso(),
-        messages: [...chat.messages, assistantMessage],
-      }));
-      setIsResponding(false);
-    }, MOCK_DELAY_MS);
+    const assistantMessage = createMessage("assistant", await requestAssistantResponse(content));
+    updateChat(chatId, (chat) => ({
+      ...chat,
+      updatedAt: nowIso(),
+      messages: [...chat.messages, assistantMessage],
+    }));
+    setIsResponding(false);
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -301,13 +389,24 @@ function App() {
     }
   }
 
+  function resizeComposer() {
+    const composer = composerRef.current;
+    if (!composer) return;
+
+    const maxHeight = Math.min(440, Math.max(240, window.innerHeight * 0.56));
+    composer.style.height = "auto";
+    composer.style.maxHeight = `${maxHeight}px`;
+    composer.style.height = `${Math.min(composer.scrollHeight, maxHeight)}px`;
+    composer.style.overflowY = composer.scrollHeight > maxHeight ? "auto" : "hidden";
+  }
+
   return (
-    <div className="min-h-screen bg-[#080b10] text-zinc-100 antialiased">
-      <div className="flex min-h-screen">
+    <div className="h-screen bg-[#080b10] text-zinc-100 antialiased">
+      <div className="flex h-screen min-h-0">
         <aside
-          className={`fixed inset-y-0 left-0 z-40 flex w-[286px] flex-col border-r border-white/10 bg-[#0d1118]/95 shadow-glow backdrop-blur transition-transform duration-200 lg:static lg:translate-x-0 ${
+          className={`fixed inset-y-0 left-0 z-40 flex w-[286px] flex-col border-r border-white/10 bg-[#080b10] shadow-glow transition-transform duration-200 ${
             isSidebarOpen ? "translate-x-0" : "-translate-x-full"
-          }`}
+          } ${isDesktopSidebarOpen ? "lg:static lg:flex lg:translate-x-0" : "lg:hidden"}`}
         >
           <div className="flex h-16 items-center gap-3 border-b border-white/10 px-4">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-300/25 bg-cyan-300/10 text-cyan-200">
@@ -385,7 +484,9 @@ function App() {
 
           <div className="border-t border-white/10 p-4">
             <div className="rounded-lg border border-emerald-300/20 bg-emerald-300/[0.07] px-3 py-2 text-xs leading-5 text-emerald-100/90">
-              Local history only. Model replies are mocked for this frontend MVP.
+              {backendHealth?.provider_configured === false
+                ? backendHealth.setup_message ?? "Add the provider key to .env, then restart the backend."
+                : "Local history stays in this browser. Prompts are de-identified before the model call."}
             </div>
           </div>
         </aside>
@@ -399,7 +500,7 @@ function App() {
           />
         ) : null}
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-white/10 bg-[#080b10]/80 px-4 backdrop-blur md:px-6">
             <button
               className="rounded-lg p-2 text-zinc-400 transition hover:bg-white/10 hover:text-white lg:hidden"
@@ -412,18 +513,40 @@ function App() {
             <button
               className="hidden rounded-lg p-2 text-zinc-400 transition hover:bg-white/10 hover:text-white lg:inline-flex"
               type="button"
-              aria-label="Sidebar is open"
-              disabled
+              aria-label={isDesktopSidebarOpen ? "Collapse sidebar" : "Open sidebar"}
+              onClick={() => setIsDesktopSidebarOpen((value) => !value)}
             >
-              <PanelLeftOpen size={19} aria-hidden="true" />
+              {isDesktopSidebarOpen ? (
+                <PanelLeftClose size={19} aria-hidden="true" />
+              ) : (
+                <PanelLeftOpen size={19} aria-hidden="true" />
+              )}
             </button>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold text-white">{activeChat?.title ?? "New chat"}</div>
-              <div className="truncate text-xs text-zinc-500">De-identification pipeline coming later</div>
+              <div className="truncate text-xs text-zinc-500">
+                {backendHealth
+                  ? backendHealth.provider_configured
+                    ? `Live backend via ${providerLabel(backendHealth.provider)}`
+                    : `${providerLabel(backendHealth.provider)} setup needed`
+                  : isBackendReachable === false
+                    ? "Backend offline"
+                    : "Connecting to backend"}
+              </div>
             </div>
             <div className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-zinc-300 sm:flex">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
-              Mock mode
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  isBackendReachable === false || backendHealth?.provider_configured === false
+                    ? "bg-amber-300"
+                    : "bg-emerald-300"
+                }`}
+              />
+              {isBackendReachable === false
+                ? "Backend offline"
+                : backendHealth?.provider_configured === false
+                  ? "Setup needed"
+                  : "Live API"}
             </div>
             <button
               className="rounded-lg p-2 text-zinc-400 transition hover:bg-white/10 hover:text-white lg:hidden"
@@ -447,12 +570,12 @@ function App() {
                     <div ref={messageEndRef} />
                   </div>
                 ) : (
-                  <EmptyState onPromptClick={setDraft} />
+                  <div ref={messageEndRef} className="min-h-[1px]" />
                 )}
               </div>
             </div>
 
-            <div className="border-t border-white/10 bg-[#080b10]/92 px-4 py-4 backdrop-blur md:px-6">
+            <div className="bg-[#080b10] px-4 pb-4 pt-2 md:px-6">
               <form className="mx-auto max-w-3xl" onSubmit={handleSubmit}>
                 <div className="rounded-xl border border-white/10 bg-[#111821] p-2 shadow-2xl shadow-black/20 transition focus-within:border-cyan-300/35">
                   <label className="sr-only" htmlFor="message">
@@ -460,17 +583,15 @@ function App() {
                   </label>
                   <textarea
                     id="message"
-                    className="max-h-48 min-h-[54px] w-full resize-none bg-transparent px-3 py-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
+                    ref={composerRef}
+                    className="min-h-[54px] w-full resize-none overflow-hidden bg-transparent px-3 py-3 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
                     placeholder="Message CloseAI Harness..."
                     value={draft}
                     onChange={(event) => setDraft(event.target.value)}
                     onKeyDown={handleComposerKeyDown}
                     disabled={isResponding}
                   />
-                  <div className="flex items-center justify-between gap-3 px-1 pb-1">
-                    <p className="truncate text-xs text-zinc-500">
-                      Enter to send. Shift+Enter for a new line.
-                    </p>
+                  <div className="flex items-center justify-end px-1 pb-1">
                     <button
                       className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-cyan-200 text-slate-950 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
                       type="submit"
@@ -485,34 +606,6 @@ function App() {
             </div>
           </section>
         </main>
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({ onPromptClick }: { onPromptClick: (prompt: string) => void }) {
-  return (
-    <div className="flex min-h-[calc(100vh-12rem)] flex-col justify-center">
-      <div className="max-w-2xl">
-        <div className="mb-5 inline-flex h-12 w-12 items-center justify-center rounded-xl border border-cyan-300/25 bg-cyan-300/10 text-cyan-100">
-          <ShieldCheck size={24} aria-hidden="true" />
-        </div>
-        <h2 className="text-2xl font-semibold tracking-normal text-white md:text-3xl">CloseAI Harness</h2>
-        <p className="mt-3 max-w-xl text-sm leading-6 text-zinc-400 md:text-base">
-          A quiet chat surface for testing local de-identification, closed-model handoff, and local re-identification.
-        </p>
-      </div>
-      <div className="mt-8 grid gap-2 sm:grid-cols-3">
-        {samplePrompts.map((prompt) => (
-          <button
-            className="min-h-[96px] rounded-lg border border-white/10 bg-white/[0.045] p-4 text-left text-sm leading-5 text-zinc-300 transition hover:border-cyan-300/30 hover:bg-cyan-300/10 hover:text-cyan-100"
-            key={prompt}
-            type="button"
-            onClick={() => onPromptClick(prompt)}
-          >
-            {prompt}
-          </button>
-        ))}
       </div>
     </div>
   );

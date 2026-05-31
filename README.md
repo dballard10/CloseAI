@@ -77,9 +77,14 @@ process. Surrogates come from `Faker` when installed, with a built-in fallback.
 ## Quickstart
 
 ```bash
-just setup
 just dev
 ```
+
+`just dev` creates `.env` if needed, installs Python and frontend dependencies,
+starts the FastAPI backend on <http://localhost:8000>, and starts the React chat
+on <http://localhost:5173>. For live OpenAI replies, add `OPENAI_API_KEY=...`
+to `.env` and restart `just dev`. For an offline smoke test, set
+`CLOSEAI_PROVIDER=echo`.
 
 Or run the setup manually:
 
