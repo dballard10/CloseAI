@@ -24,8 +24,9 @@ class Masker:
             span = d.span
             original = text[span.start : span.end]
             out = out[: span.start] + d.replacement + out[span.end :]
-            if d.action == Action.MASK and d.placeholder:
-                entity_map[d.placeholder] = original
+            # Only SURROGATE is reversible: map the fake value back to the real one.
+            if d.action == Action.SURROGATE and d.surrogate:
+                entity_map[d.surrogate] = original
         return MaskResult(
             original_text=text,
             masked_text=out,

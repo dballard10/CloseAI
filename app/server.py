@@ -32,7 +32,6 @@ class DeidentifyRequest(BaseModel):
 class QueryRequest(BaseModel):
     text: str
     system: str | None = None
-    provider: str | None = None
     model: str | None = None
 
 
@@ -47,8 +46,7 @@ def health() -> dict:
         "status": "ok",
         "presidio_mode": _pipeline.presidio.mode,
         "llm_detector_enabled": _pipeline.llm_detector.enabled,
-        "provider": _settings.provider,
-        "model": _settings.model,
+        "closed_model": _settings.model,
     }
 
 
@@ -60,10 +58,9 @@ def deidentify(req: DeidentifyRequest) -> dict:
 
 @app.post("/api/query")
 def query(req: QueryRequest) -> dict:
-    # Allow per-request provider/model override without rebuilding detectors.
-    if req.provider:
-        _pipeline.model.provider = req.provider
+    # Allow a per-request model override without rebuilding detectors.
     if req.model:
         _pipeline.model.model = req.model
+        _pipeline.model._resolved_model = None
     result = _pipeline.deidentify_and_query(req.text, system=req.system)
     return result.model_dump()

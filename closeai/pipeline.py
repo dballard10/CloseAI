@@ -61,7 +61,6 @@ class CloseAIPipeline:
         self.masker = Masker()
         self.reidentifier = Reidentifier()
         self.model = ClosedModelClient(
-            self.settings.provider,
             self.settings.model,
             ollama_host=self.settings.ollama_host,
         )
@@ -95,8 +94,8 @@ class CloseAIPipeline:
             reidentified_response=final,
             mask_result=mask_result,
             n_detected=len(mask_result.decisions),
-            n_masked=actions.count(Action.MASK),
-            n_generalized=actions.count(Action.GENERALIZE),
+            n_surrogated=actions.count(Action.SURROGATE),
+            n_described=actions.count(Action.DESCRIBE),
             n_dropped=actions.count(Action.DROP),
             n_kept=actions.count(Action.KEEP),
         )
