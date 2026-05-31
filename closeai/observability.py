@@ -38,6 +38,10 @@ except Exception:  # pragma: no cover
 _INITIALIZED = False
 
 
+def _weave_configured() -> bool:
+    return bool(os.getenv("WANDB_API_KEY") or os.getenv("WANDB_API_KEY_FILE"))
+
+
 def init_weave(project: str | None = None) -> bool:
     """Initialise Weave tracing. Returns True if Weave is actually active.
 
@@ -50,6 +54,8 @@ def init_weave(project: str | None = None) -> bool:
         return False
     if _INITIALIZED:
         return True
+    if not _weave_configured():
+        return False
 
     project = project or os.getenv("WEAVE_PROJECT", "closeai")
     try:
@@ -70,13 +76,13 @@ def op(*op_args: Any, **op_kwargs: Any) -> Callable:
     # Bare decorator usage: @op
     if len(op_args) == 1 and callable(op_args[0]) and not op_kwargs:
         func = op_args[0]
-        if _WEAVE_AVAILABLE:
+        if _WEAVE_AVAILABLE and _weave_configured():
             return weave.op()(func)
         return func
 
     # Parametrised usage: @op(name="...")
     def decorator(func: Callable) -> Callable:
-        if _WEAVE_AVAILABLE:
+        if _WEAVE_AVAILABLE and _weave_configured():
             return weave.op(*op_args, **op_kwargs)(func)
 
         @functools.wraps(func)

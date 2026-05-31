@@ -37,8 +37,12 @@ class PresidioDetector:
         self._analyzer = None
         self._mode = "regex"
         try:
+            import spacy
             from presidio_analyzer import AnalyzerEngine
             from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+            if not spacy.util.is_package(spacy_model):
+                raise RuntimeError(f"spaCy model '{spacy_model}' is not installed")
 
             provider = NlpEngineProvider(
                 nlp_configuration={
@@ -61,7 +65,7 @@ class PresidioDetector:
     @op
     def detect(self, text: str) -> list[Span]:
         if self._mode == "presidio":
-            return self._detect_presidio(text)
+            return [*self._detect_presidio(text), *self._detect_regex(text)]
         return self._detect_regex(text)
 
     def _detect_presidio(self, text: str) -> list[Span]:

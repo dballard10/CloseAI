@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 24% 96%;
+  --foreground: 222 32% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 32% 11%;
+  --primary: 173 58% 28%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 214 20% 91%;
+  --secondary-foreground: 222 32% 16%;
+  --muted: 210 20% 93%;
+  --muted-foreground: 215 14% 42%;
+  --accent: 39 87% 58%;
+  --accent-foreground: 32 35% 12%;
+  --destructive: 0 72% 47%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 18% 82%;
+  --input: 214 18% 82%;
+  --ring: 173 58% 28%;
+  --radius: 8px;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #fbfcfd 0%, #eef3f6 100%);
+  color: hsl(var(--foreground));
+}
+
+button,
+textarea,
+select {
+  font: inherit;
+}
+
+.pipeline-grid {
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+}
+
+@media (max-width: 1024px) {
+  .pipeline-grid {
+    grid-template-columns: 1fr;
+  }
+}

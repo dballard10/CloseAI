@@ -6,3 +6,10 @@ __pycache__/
 wandb/
 *.egg-info/
 .pytest_cache/
+node_modules/
+.next/
+out/
+coverage/
+tsconfig.tsbuildinfo
+.playwright-cli/
+output/
