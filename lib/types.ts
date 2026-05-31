@@ -78,3 +78,46 @@ export type PipelineEvent = {
   patch?: PipelinePatch;
   error?: string;
 };
+
+export type ChatClassificationResponse = {
+  rawPrompt: string;
+  detectedEntities: SensitiveEntity[];
+  initialSanitizedPrompt: string;
+  sanitizedPrompt: string;
+  checkerResult: CheckerResult;
+  repairedSanitizedPrompt?: string | null;
+  finalCheckerResult: CheckerResult;
+  utilityResult: UtilityResult;
+  externalCallAllowed: boolean;
+  preservedConcepts: string[];
+  weaveTraceUrl?: string | null;
+  promptVersions?: {
+    deidPrompt: string;
+    checkerPrompt: string;
+    repairPrompt: string;
+  };
+  weaveMetadata?: RunResponse["weaveMetadata"];
+};
+
+export type ChatApproveResponse = {
+  rawPrompt: string;
+  sanitizedPrompt: string;
+  detectedEntities: SensitiveEntity[];
+  finalCheckerResult: CheckerResult;
+  utilityResult: UtilityResult;
+  externalCallAllowed: boolean;
+  externalConsultantResponse?: ExternalConsultantResponse | null;
+  finalAnswer: string;
+  weaveTraceUrl?: string | null;
+  weaveMetadata?: RunResponse["weaveMetadata"];
+};
+
+export type HealthResponse = {
+  status: string;
+  product?: string;
+  consult_pipeline?: string;
+  internal_provider?: string;
+  external_provider?: string;
+  provider?: string;
+  model?: string;
+};

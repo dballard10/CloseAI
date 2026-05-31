@@ -25,7 +25,7 @@ except Exception:
 from closeai.config import Settings
 from closeai.pipeline import CloseAIPipeline
 from closeai.private_consult import PrivateConsultPipeline
-from closeai.schemas import ConsultMode, RunRequest
+from closeai.schemas import ConsultMode, RunRequest, SensitiveEntity
 
 app = FastAPI(title="ClosedAI", description="Evaluated privacy gate for external LLM consultation")
 
@@ -56,6 +56,25 @@ class QueryRequest(BaseModel):
 
 class LegacyRunRequest(BaseModel):
     rawPrompt: str
+    mode: ConsultMode = "general"
+
+
+class ChatClassifyRequest(BaseModel):
+    rawPrompt: str
+    mode: ConsultMode = "general"
+
+
+class ChatReviseClassificationRequest(BaseModel):
+    rawPrompt: str
+    feedback: str
+    mode: ConsultMode = "general"
+
+
+class ChatApproveRequest(BaseModel):
+    rawPrompt: str
+    sanitizedPrompt: str
+    detectedEntities: list[SensitiveEntity] = []
+    preservedConcepts: list[str] = []
     mode: ConsultMode = "general"
 
 
@@ -91,6 +110,27 @@ def run_stream(req: RunRequest) -> StreamingResponse:
             yield json.dumps(event) + "\n"
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+@app.post("/classify")
+def classify(req: ChatClassifyRequest) -> dict:
+    return _consult_pipeline.classify_for_chat(req.rawPrompt, req.mode)
+
+
+@app.post("/revise-classification")
+def revise_classification(req: ChatReviseClassificationRequest) -> dict:
+    return _consult_pipeline.classify_for_chat(req.rawPrompt, req.mode, feedback=req.feedback)
+
+
+@app.post("/approve-and-query")
+def approve_and_query(req: ChatApproveRequest) -> dict:
+    return _consult_pipeline.approve_chat_query(
+        raw_prompt=req.rawPrompt,
+        sanitized_prompt=req.sanitizedPrompt,
+        detected_entities=req.detectedEntities,
+        preserved_concepts=req.preservedConcepts,
+        mode=req.mode,
+    )
 
 
 @app.post("/api/run")

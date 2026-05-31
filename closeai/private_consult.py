@@ -564,7 +564,7 @@ class PrivateConsultPipeline:
                     text=text,
                     type=_entity_type(item.get("type")),
                     risk=_risk_level(item.get("risk")),  # type: ignore[arg-type]
-                    replacementHint=str(item.get("replacementHint") or "semantic abstraction"),
+                    replacementHint=str(item.get("replacementHint") or item.get("replacement_hint") or "semantic abstraction"),
                 )
             )
         return entities
@@ -625,7 +625,8 @@ class PrivateConsultPipeline:
             "that preserves the user's task and useful reasoning context while removing direct identifiers. "
             "Do not use placeholders like [PERSON]. Do not include names, organizations, addresses, emails, "
             "phone numbers, exact dates, exact locations, course IDs, project names, or specific medical "
-            "diagnoses unless they are truly generic. Return JSON only."
+            "diagnoses unless they are truly generic. detected_entities must list every identifier or "
+            "quasi-identifier removed or generalized from the raw prompt. Return JSON only."
         )
         user = (
             f"Mode: {mode}\n"
@@ -636,10 +637,14 @@ class PrivateConsultPipeline:
         data = self._trusted_chat_json(system, user, DEID_SCHEMA)
         if not data:
             return None
-        sanitized = str(data.get("sanitized_prompt", "")).strip()
+        sanitized = str(data.get("sanitized_prompt") or data.get("sanitizedPrompt") or "").strip()
         if not sanitized:
             return None
-        concepts = self._normalize_concepts(_as_str_list(data.get("preserved_concepts")), entities, mode)
+        concepts = self._normalize_concepts(
+            _as_str_list(data.get("preserved_concepts") or data.get("preservedConcepts")),
+            entities,
+            mode,
+        )
         return sanitized, concepts or DOMAIN_CONCEPTS.get(mode, DOMAIN_CONCEPTS["general"])
 
     @op
@@ -661,8 +666,10 @@ class PrivateConsultPipeline:
             "landlord, clinician, student, medical leave, performance improvement plan, security deposit, "
             "academic integrity concern, and HR response are useful context and should usually be preserved. "
             "Specific diagnoses must be generalized to phrases like health condition, medical diagnosis, or "
-            "mental health condition. Return JSON only with sanitized_prompt, detected_entities, and "
-            "preserved_concepts."
+            "mental health condition. detected_entities must list every identifier or quasi-identifier you "
+            "removed or generalized from the raw question, including names, schools, employers, course IDs, "
+            "project names, locations, dates, and role-specific names. Return JSON only with sanitized_prompt, "
+            "detected_entities, and preserved_concepts."
         )
         retry_context = ""
         if feedback or utility:
@@ -680,12 +687,12 @@ class PrivateConsultPipeline:
         if not data:
             return None
 
-        sanitized = str(data.get("sanitized_prompt") or "").strip()
+        sanitized = str(data.get("sanitized_prompt") or data.get("sanitizedPrompt") or "").strip()
         if not sanitized:
             return None
 
         entities: list[SensitiveEntity] = []
-        for item in data.get("detected_entities", []):
+        for item in data.get("detected_entities") or data.get("detectedEntities") or []:
             if not isinstance(item, dict):
                 continue
             text = str(item.get("text") or "").strip()
@@ -701,7 +708,11 @@ class PrivateConsultPipeline:
             )
 
         entities = _dedupe_entities(entities)
-        concepts = self._normalize_concepts(_as_str_list(data.get("preserved_concepts")), entities, mode)
+        concepts = self._normalize_concepts(
+            _as_str_list(data.get("preserved_concepts") or data.get("preservedConcepts")),
+            entities,
+            mode,
+        )
         return sanitized, entities, concepts or DOMAIN_CONCEPTS.get(mode, DOMAIN_CONCEPTS["general"])
 
     @op
@@ -1283,6 +1294,235 @@ class PrivateConsultPipeline:
                 ],
             ).model_dump(mode="json"),
         }
+
+    def classify_for_chat(
+        self,
+        raw_prompt: str,
+        mode: ConsultMode = "general",
+        feedback: str | None = None,
+    ) -> dict[str, Any]:
+        mode = _infer_mode(raw_prompt, mode)
+        tracker = create_run_tracker(
+            project=self.weave_project,
+            raw_prompt=raw_prompt,
+            mode=mode,
+            model_status=self.model_status,
+            route="chat_classify",
+        )
+
+        try:
+            seed_checker = None
+            seed_utility = None
+            if feedback:
+                seed_checker = CheckerResult(
+                    passed=False,
+                    riskLevel="medium",
+                    leakageTypes=["user_revision_request"],
+                    leakedItems=[],
+                    explanation=f"User feedback for revision: {feedback}",
+                    recommendedFix=feedback,
+                )
+                seed_utility = UtilityResult(
+                    utilityScore=0,
+                    preservedConcepts=[],
+                    missingUsefulContext=[feedback],
+                )
+
+            deid = self.llm_deidentify_once(raw_prompt, mode, seed_checker, seed_utility) if self._use_llm_pipeline() else None
+            if deid is None:
+                entities = self.detect_entities(raw_prompt, mode)
+                sanitized, concepts = self.deidentify(raw_prompt, entities, mode)
+                check = self.check(sanitized, entities)
+                utility = self.evaluate_utility(sanitized, mode, concepts)
+            else:
+                sanitized, entities, concepts = deid
+                checked = self.llm_check_once(raw_prompt, sanitized, entities, concepts, mode)
+                if checked is None:
+                    check = self.check(sanitized, entities)
+                    utility = self.evaluate_utility(sanitized, mode, concepts)
+                else:
+                    check, utility = checked
+
+            initial_sanitized = sanitized
+            initial_check = check
+            final_sanitized = sanitized
+            final_check = check
+            final_utility = utility
+            repaired: str | None = None
+
+            tracker.stage(
+                "classified",
+                inputs={"feedback": feedback},
+                output={
+                    "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                    "sanitized_prompt": sanitized,
+                    "checker_result": check.model_dump(mode="json"),
+                    "utility_result": utility.model_dump(mode="json"),
+                },
+            )
+
+            if self._use_llm_pipeline() and (not check.passed or utility.utilityScore < self.utility_threshold):
+                retry = self.llm_deidentify_once(raw_prompt, mode, check, utility)
+                if retry is not None:
+                    retry_sanitized, retry_entities, retry_concepts = retry
+                    retry_checked = self.llm_check_once(raw_prompt, retry_sanitized, retry_entities, retry_concepts, mode)
+                    if retry_checked is not None:
+                        repaired = retry_sanitized
+                        final_sanitized = retry_sanitized
+                        entities = retry_entities
+                        concepts = retry_concepts
+                        final_check, final_utility = retry_checked
+                        tracker.stage(
+                            "classification_retried",
+                            inputs={"previous_checker_result": check.model_dump(mode="json")},
+                            output={
+                                "detected_entities": [entity.model_dump(mode="json") for entity in entities],
+                                "sanitized_prompt": final_sanitized,
+                                "checker_result": final_check.model_dump(mode="json"),
+                                "utility_result": final_utility.model_dump(mode="json"),
+                            },
+                        )
+
+            external_allowed = final_check.passed and final_utility.utilityScore >= self.utility_threshold
+            eval_scores = {
+                "direct_leakage": 1.0 if final_check.passed else 0.0,
+                "semantic_utility": final_utility.utilityScore,
+                "checker_pass": 1.0 if final_check.passed else 0.0,
+                "approval_ready": 1.0 if external_allowed else 0.0,
+            }
+            tracker.stage(
+                "review_ready",
+                output={
+                    "external_call_allowed": external_allowed,
+                    "utility_threshold": self.utility_threshold,
+                    "eval_scores": eval_scores,
+                },
+            )
+            response = {
+                "rawPrompt": raw_prompt,
+                "detectedEntities": [entity.model_dump(mode="json") for entity in entities],
+                "initialSanitizedPrompt": initial_sanitized,
+                "sanitizedPrompt": final_sanitized,
+                "checkerResult": initial_check.model_dump(mode="json"),
+                "repairedSanitizedPrompt": repaired,
+                "finalCheckerResult": final_check.model_dump(mode="json"),
+                "utilityResult": final_utility.model_dump(mode="json"),
+                "externalCallAllowed": external_allowed,
+                "preservedConcepts": concepts,
+                "weaveTraceUrl": getattr(tracker, "ui_url", None) or os.getenv("WEAVE_TRACE_URL"),
+                "promptVersions": PROMPT_VERSIONS.model_dump(mode="json"),
+                "weaveMetadata": WeaveMetadata(
+                    project=self.weave_project,
+                    status=self.model_status,
+                    runId=getattr(tracker, "run_id", None),
+                    traceId=getattr(tracker, "trace_id", None),
+                    dashboardUrl=getattr(tracker, "ui_url", None),
+                    trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
+                    evalScores=eval_scores,
+                    promptComparison=[
+                        {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
+                        {"version": "deid_prompt:v3-llm-loop", "leakagePassRate": 0.95, "avgUtilityScore": 0.86},
+                    ],
+                ).model_dump(mode="json"),
+            }
+            tracker.finish(output={"external_call_allowed": external_allowed, "eval_scores": eval_scores})
+            return response
+        except Exception as exc:
+            tracker.stage("error", output={"error": str(exc)})
+            tracker.finish(exception=exc)
+            raise
+
+    def approve_chat_query(
+        self,
+        raw_prompt: str,
+        sanitized_prompt: str,
+        detected_entities: list[SensitiveEntity],
+        preserved_concepts: list[str],
+        mode: ConsultMode = "general",
+    ) -> dict[str, Any]:
+        mode = _infer_mode(raw_prompt, mode)
+        tracker = create_run_tracker(
+            project=self.weave_project,
+            raw_prompt=raw_prompt,
+            mode=mode,
+            model_status=self.model_status,
+            route="chat_approve",
+        )
+
+        try:
+            checked = (
+                self.llm_check_once(raw_prompt, sanitized_prompt, detected_entities, preserved_concepts, mode)
+                if self._use_llm_pipeline()
+                else None
+            )
+            if checked is None:
+                final_check = self.check(sanitized_prompt, detected_entities)
+                utility = self.evaluate_utility(sanitized_prompt, mode, preserved_concepts)
+            else:
+                final_check, utility = checked
+
+            external_allowed = final_check.passed and utility.utilityScore >= self.utility_threshold
+            tracker.stage(
+                "approval_gate",
+                inputs={"approved_sanitized_prompt": sanitized_prompt},
+                output={
+                    "external_call_allowed": external_allowed,
+                    "checker_result": final_check.model_dump(mode="json"),
+                    "utility_result": utility.model_dump(mode="json"),
+                },
+            )
+
+            external = self.external_consult(sanitized_prompt, mode) if external_allowed else None
+            if external is not None:
+                tracker.stage(
+                    "external_consulted",
+                    inputs={"external_prompt": sanitized_prompt, "provider": self.external_provider},
+                    output=external.model_dump(mode="json"),
+                )
+
+            final_answer = self.finalize(raw_prompt, mode, external, external_allowed)
+            tracker.stage(
+                "finalized",
+                inputs={"external_call_allowed": external_allowed},
+                output={"final_answer": final_answer},
+            )
+
+            eval_scores = {
+                "direct_leakage": 1.0 if final_check.passed else 0.0,
+                "semantic_utility": utility.utilityScore,
+                "checker_pass": 1.0 if final_check.passed else 0.0,
+                "external_called": 1.0 if external_allowed else 0.0,
+            }
+            response = {
+                "rawPrompt": raw_prompt,
+                "sanitizedPrompt": sanitized_prompt,
+                "detectedEntities": [entity.model_dump(mode="json") for entity in detected_entities],
+                "finalCheckerResult": final_check.model_dump(mode="json"),
+                "utilityResult": utility.model_dump(mode="json"),
+                "externalCallAllowed": external_allowed,
+                "externalConsultantResponse": external.model_dump(mode="json") if external else None,
+                "finalAnswer": final_answer,
+                "weaveTraceUrl": getattr(tracker, "ui_url", None) or os.getenv("WEAVE_TRACE_URL"),
+                "weaveMetadata": WeaveMetadata(
+                    project=self.weave_project,
+                    status=self.model_status,
+                    runId=getattr(tracker, "run_id", None),
+                    traceId=getattr(tracker, "trace_id", None),
+                    dashboardUrl=getattr(tracker, "ui_url", None),
+                    trackingStatus="live" if getattr(tracker, "enabled", False) else "not_configured",
+                    evalScores=eval_scores,
+                    promptComparison=[
+                        {"version": "deid_prompt:v1-redaction", "leakagePassRate": 0.7, "avgUtilityScore": 0.62},
+                        {"version": "deid_prompt:v3-llm-loop", "leakagePassRate": 0.95, "avgUtilityScore": 0.86},
+                    ],
+                ).model_dump(mode="json"),
+            }
+            tracker.finish(output={"external_call_allowed": external_allowed, "eval_scores": eval_scores})
+            return response
+        except Exception as exc:
+            tracker.stage("error", output={"error": str(exc)})
+            tracker.finish(exception=exc)
+            raise
 
     def run_stream(self, raw_prompt: str, mode: ConsultMode = "general") -> Iterable[dict[str, Any]]:
         mode = _infer_mode(raw_prompt, mode)
